@@ -14,6 +14,19 @@ export function checkedImText(text: string): string {
   if (count > IM_WORDS) throw new Error(`IM message has ${count} words; maximum is ${IM_WORDS}. Rewrite as a short high-level update. Do not split it into multiple messages.`)
   return text
 }
+/**
+ * A reply's length limit by Source: Feishu takes `IM_WORDS` words, where a thread reads as a feed; DingTalk takes a
+ * character count, where an answer carries its evidence; a Source absent here sets no limit.
+ */
+export const REPLY_LIMITS: Readonly<Record<string, { words: number } | { chars: number }>> = { feishu: { words: IM_WORDS }, dingtalk: { chars: 4000 } }
+/** Validates an outgoing reply against its Source's limit, if it has one. */
+export function checkedReplyText(text: string, source: string): string {
+  const limit = REPLY_LIMITS[source]
+  if (!limit) return text
+  if ('words' in limit) return checkedImText(text)
+  if (text.length > limit.chars) throw new Error(`Reply has ${text.length} characters; maximum is ${limit.chars} on ${source}. Shorten it; keep the evidence, drop the narration.`)
+  return text
+}
 export const fill = (template: string, values: Record<string, string>): string => template.replace(/\{(\w+)\}/g, (_, name: string) => values[name] ?? '')
 /** Case-insensitive comparison for GitHub logins and repository names. */
 export const sameName = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()

@@ -133,6 +133,30 @@ it('answers every routing tool in one shape: the decision it recorded, why, and 
   expect(TICKET_STATES).toContain(stopped.ticket.state)
 })
 
+it('answers a question from the route, where it was written and without a ticket, and records the named ignore reasons as codes', async () => {
+  const route = async (item: Record<string, unknown>) => ((await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [item] })).results as unknown[])[0]
+  const lark = vi.mocked(Commands.prototype.lark)
+  const question = feishu('1', '@bot 晨报的窗口是按什么日期算的？')
+  h.runtime.receive(question); await h.runtime.idle()
+  const answer = '按 opp_job.created_at 的自然日，见 report/window.py:12。'
+  expect(await route({ kind: 'answer', trigger_id: question.id, text: answer })).toEqual({ trigger_id: question.id, kind: 'answer', decision: 'ignore',
+    reason: 'Answered directly by the orchestrator, without a ticket' })
+  const sent = lark.mock.calls.map(([args]) => args as string[]).find(args => args.includes(answer))
+  expect(sent).toEqual(expect.arrayContaining(['+messages-reply', '--message-id', question.meta.messageId, answer]))
+  expect(h.runtime.store.tickets.list()).toEqual([])
+  expect(await route({ kind: 'answer', trigger_id: question.id })).toEqual({ trigger_id: question.id, kind: 'answer', refused: 'answer needs text' })
+  // A Feishu answer keeps the IM limit, which the Outbox checks before anything is queued.
+  const second = feishu('2', '@bot 再问一个')
+  h.runtime.receive(second); await h.runtime.idle()
+  expect(await route({ kind: 'answer', trigger_id: second.id, text: words(IM_WORDS + 1) })).toMatchObject({ refused: expect.stringContaining(`maximum is ${IM_WORDS}`) })
+  const chatter = feishu('3', '@bot 谢谢'), again = feishu('4', '@bot 修一下回归')
+  for (const trigger of [chatter, again]) h.runtime.receive(trigger)
+  await h.runtime.idle()
+  expect(await route({ kind: 'ignore', trigger_id: chatter.id, reason: 'chatter' })).toMatchObject({ decision: 'ignore', reason: 'Greeting, thanks, acknowledgement or small talk; nothing to do' })
+  expect(await route({ kind: 'ignore', trigger_id: again.id, reason: 'duplicate' })).toMatchObject({ decision: 'ignore', reason: 'An open ticket already covers this change' })
+  expect(h.runtime.store.triggers.disposition(chatter.id)?.decisionId).toBeDefined()
+})
+
 it('routes several triggers in one call, in order, and answers a refused or failed item without undoing the others', async () => {
   const { ticket } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const thanks = feishu('2', '@bot 谢谢'), request = feishu('3', '@bot 另一个问题'), other = feishu('4', '@bot 顺便看看这个'), more = feishu('6', '@bot 还有这个')

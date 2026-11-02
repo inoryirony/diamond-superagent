@@ -82,7 +82,7 @@ An automated reviewer using an ordinary account counts as a person to the host. 
 
 ## Routing candidates
 
-The main Session routes explicit candidates with `orchestrator_route`. One call can contain several accept, attach, stop or ignore decisions. Each item is processed independently: a refused item or a missing field does not prevent the others from running.
+The main Session routes explicit candidates with `orchestrator_route`. One call can contain several accept, answer, attach, stop or ignore decisions; an answer posts text where the question was written and records the candidate as ignored with reason `answered`, so a question needs no Ticket. Each item is processed independently: a refused item or a missing field does not prevent the others from running.
 
 An inferred candidate normally needs a full assessment. There is one shortcut: if its card clearly touches no enabled rule, such as plain chat or unrelated discussion, the main Session may ignore it directly. The Decision records `ignoredFromCard` to distinguish this from a rule assessment. The main Session reads the enabled rules in its Policy prompt section.
 
