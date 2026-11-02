@@ -174,6 +174,8 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | `assessment` | MasterAssessor | Creates the Eval's Session if needed, steers the candidate card into its turn, then tells the Engine it was delivered, which starts the Eval's deadline | 4, none while paused | 2 s doubling to 60 s |
 | `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
 | `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
+| `review` | Reviewers | Runs a review of a Ticket's result in a Session of its own, with the deploy phase when it is on; the result's verdict comes back through the Engine | 4, none while paused | A passing failure runs again after 5 s doubling to 300 s, three times |
+| `review-verdict` | Reviewers | Ends the Reviewer Session's turn once its verdict is recorded, so a review never waits on a tool call to finish | 16 | 1 s doubling to 30 s |
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
 | `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
 | `reply` | Outbox | Sends a message for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
@@ -211,6 +213,12 @@ Transient provider and network failures get three retries. Launches use effect b
 `MasterAssessor` (`src/app/assessment.ts`) delivers each candidate to a Session of the Eval's own, `eval-<eval id>` (`evalSessionId` in `src/app/sessions.ts`), created with the orchestrator role on first delivery. `request` queues an assessment effect; `release` drops cached state when its Eval ends. A message that arrives on a Thread under assessment is steered into that Eval's Session as a `followup_while_assessing` card (the `trigger.queuedBehindEval` event), where `orchestrator_route` may dispose of it at once; one it leaves alone waits for the next Eval.
 
 Its `context`, `read` and `decide` methods serve `orchestrator_eval`, `orchestrator_eval_read` and `orchestrator_eval_decide`. They provide bounded Thread context through `SourceRegistry.threadContext`, repository context, and decision submission. A kind without a context reader supplies only the Trigger and batch.
+
+### Reviewers
+
+`Reviewers` (`src/app/reviewers.ts`) is the phase between a worker's result and its person. With `executor.reviews` on, a `ready` Report asks for a review, which the core's `Reviews` part records on the Ticket and hands to this port; it queues a `review` effect, which opens `reviewer-<ticket>-<round>` (`reviewerSessionId` in `src/executor/dsh.ts`) with the reviewer role, tells it what to review with the worker's directory, and runs the deploy phase (`deployCommand`, then `e2eCommand`, with `sh` in the Ticket's directory) when `executor.deploy` is on. The verdict comes through `Engine.reviewEnded`: a pass delivers the result as the Report would have, a return sends the findings to the worker as its next Assignment, and a review that cannot run or ends its turn without a verdict leaves the result to a person (`unfinished`).
+
+The core's `Reviews` (`src/core/reviews.ts`) records the rounds (`REVIEW_ROUNDS`, 3), decides through `reviewRequired` whether a `ready` Report asks for a review, and ends a passed Ticket through `Tickets.finishReviewed`. A test stands in for the Reviewer Session's model through `Reviewers.answer`, and finishes a review by its Session id with `Reviewers.reviewed`.
 
 `assessmentOutcome` converts the model's answer for `Engine.decide`. Evals checks inferred acceptance against the current Policy again.
 

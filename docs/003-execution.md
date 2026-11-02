@@ -10,7 +10,9 @@ Each open Ticket has one stage, determined by what it is waiting for. Read the t
 | --- | --- | --- |
 | person / delivery | Delivering an Input to the Executor Session failed; it is retried after 2 seconds, then after a delay that doubles up to a minute, and a success, a new Assignment or the Ticket's end clears it | Input undelivered |
 | person / answer | It has an Attention | Awaiting answer |
-| person / review | The latest Report is `ready` | Awaiting review |
+| review / running | A review of the latest result runs, or the result is `ready` and its first review has not started yet (`executor.reviews`) | Under review |
+| person / returned | The last review returned the result and its worker has not reported again | Returned by review |
+| person / review | The latest Report is `ready` and the reviews are off or out of rounds, or the last review could not judge the result | Awaiting review |
 | person / blocked, failed | The latest Report is `blocked` or `failed`, and no person's message reached the Ticket since | Blocked · Failed |
 | working / queued | No Assignment, or a pending one | Queued |
 | idle | The latest Report is `waiting`, or the Assignment ended | Waiting for a Trigger |
@@ -89,9 +91,32 @@ The default instructions allow auto-merge only for a pull request opened for the
 
 Reviews without a body, such as approvals, also arrive as Triggers and can wake an Executor waiting for review. These instructions govern the agent, not GitHub's merge rules. To enforce approvals, require them in branch protection and dismiss stale approvals. Omit the merge CLI or remove the auto-merge paragraph to require manual merging.
 
+## The result pipeline
+
+A worker's result reaches its person through the stages `executor.reviews` and `executor.deploy` switch, in order:
+
+1. **Review** (`reviews`, on by default). A `ready` Report is not the Ticket's result: it asks for a review, which runs in a
+   Session of its own (`reviewer-<ticket>-<round>`) with the worker's directory and tools but none that change it. The Reviewer
+   reads the card, the inputs and the worker's transcript, and the diff, and finishes with `orchestrator_review`.
+   - **Passed:** the result is the Ticket's, exactly as the Report would have been: the Ticket ends as "How a Ticket ends"
+     describes, or waits for a person where it follows open pull requests.
+   - **Returned:** the findings go to the same worker as the first Input of a new Assignment, which revises the same branch.
+     A Ticket takes at most `REVIEW_ROUNDS` (3) rounds; a result returned in the last one is the Ticket's, so a person
+     decides whether to retry the worker.
+   - **Unfinished:** a review whose Session cannot start, or that ends its turn without a verdict, does not pass anything:
+     the result waits for a person as `person / review`, and the review's summary says why.
+2. **Deploy** (`deploy`, off by default; needs `reviews`). Before the verdict, the review runs `deployCommand` and then
+   `e2eCommand` with `sh` in the Ticket's directory, with its execution environment as their environment. A failure of either
+   returns the result with the command's output as the finding; passing output is recorded as a note on the Ticket. With the
+   phase on and no command named, the result waits for a person.
+
+A review runs outside the worker slots, up to four at a time, and a host restart starts the reviews still running again. A
+person stops a review with the Ticket. The Reviewer cannot merge, push or change the workspace: its Session's tools only read
+and check.
+
 ## How a Ticket ends
 
-- **Ready without a pull request:** a `ready` Report ends the Ticket as completed.
+- **Ready without a pull request:** a `ready` Report ends the Ticket as completed, once its review passed it when the review is on.
 - **Nothing to do:** an Executor that finds no work for a person to act on, such as a request that does not reproduce or is superseded, reports `dropped`. The Ticket ends without a message, unless a matched rule asks for one, and a person's later message on its Threads resumes it.
 ### Pull requests
 
@@ -103,7 +128,7 @@ A close does not end the Ticket while resumed, retried or recovered work is unfi
 
 Chat Channels receive one final notice about the pull-request outcome. GitHub already displays the outcome on the pull request itself. Removing a Ticket's Subscription to a pull request also stops it following that pull request.
 
-"Awaiting review" therefore means a `ready` Report with a pull request.
+"Awaiting review" therefore means a passed result with a pull request still open.
 
 ### Follow-ups and context Threads
 
