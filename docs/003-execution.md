@@ -107,8 +107,21 @@ A worker's result reaches its person through the stages `executor.reviews` and `
      the result waits for a person as `person / review`, and the review's summary says why.
 2. **Deploy** (`deploy`, off by default; needs `reviews`). Before the verdict, the review runs `deployCommand` and then
    `e2eCommand` with `sh` in the Ticket's directory, with its execution environment as their environment. A failure of either
-   returns the result with the command's output as the finding; passing output is recorded as a note on the Ticket. With the
-   phase on and no command named, the result waits for a person.
+   returns the result with the command's output as the finding; passing output is recorded as a note on the Ticket, naming the
+   round that ran. With the phase on and no command named, the result waits for a person.
+
+   The deploy phase runs beside the Reviewer's own turn rather than before it, so a review waiting on a deploy still ends with
+   its turn and a stop reaches it. While it runs, that turn ending is not the verdict: the deploy's outcome settles the
+   review, and a turn that ends with no verdict leaves the result for a person only once no deploy is pending — otherwise the
+   deploy's finding, the reason the result is not working on the test environment, would have no review left to record it on.
+
+   Switching either phase in the panel takes effect at the next result, without restarting: `Reviews` reads `executor.reviews`
+   when a result arrives, and the Reviewer is wired whether or not the phase was on at startup.
+
+   A working pair of commands for the ZKAI repositories is in `scripts/deploy-test-env.sh` and `scripts/e2e-test-env.sh`. The
+   deploy one proves the Ticket's merge request reached the branch whose pipeline deploys the test environment and that its
+   image was built; the end-to-end one asks the running service what it serves, so a merged commit whose pod still runs the
+   previous image fails the review instead of passing it.
 
 A review runs outside the worker slots, up to four at a time, and a host restart starts the reviews still running again. A
 person stops a review with the Ticket. The Reviewer cannot merge, push or change the workspace: its Session's tools only read

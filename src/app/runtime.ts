@@ -155,8 +155,10 @@ export class Runtime extends Service implements SourceHost {
       const policy = () => settingsPolicy(store.settings(), sources)
       // The Executor reviews results as long as the settings say so, read at each report: the phase is configurable at runtime.
       executor.reviews = () => store.settings().executor.reviews
-      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
-        ...store.settings().executor.reviews ? { reviewer: reviewers } : {},
+      // The Reviewer is wired unconditionally: `Reviews.required` reads `executor.reviews` when a result arrives, so switching the
+      // phase off and on again in the panel takes effect without a restart. Passing it only when it was on at startup left an
+      // installation that started with reviews off unable to review anything until it restarted.
+      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor, reviewer: reviewers,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))

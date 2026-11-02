@@ -153,13 +153,18 @@ export async function startRuntime(seed?: (store: Store) => void) {
   }
   /** A prepare command (`sh -c`) waits for this while it is set. */
   const hooks: { prepare?: Promise<void> } = {}
+  /** Scripts whose `sh -c` invocation must fail, by script text, with the message its stderr carries. */
+  const failures = new Map<string, Error>()
   const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
     const argv = [...spec.argv]
     while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
     const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
-    const exited = { exitCode: 0, signal: null }
-    const done = argv[0] === 'sh' && hooks.prepare ? hooks.prepare.then(() => exited) : Promise.resolve(exited)
-    return { done, collected: { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') } }
+    const script = argv[0] === 'sh' && argv[1] === '-c' ? argv[2] ?? '' : ''
+    // `failures` holds scripts that exit non-zero, so a test can make a prepare, deploy or end-to-end command fail.
+    const exitCode = failures.get(script) ?? 0
+    const exited = { exitCode, signal: null }
+    const done = argv[0] === 'sh' && hooks.prepare && exitCode === 0 ? hooks.prepare.then(() => exited) : Promise.resolve(exited)
+    return { done, collected: { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader(failures.has(script) ? (failures.get(script)!.message ?? '') : '') } }
   }) }
   const agents = new Map<string, FakeAgent>()
   /** Each Session's next step, which takes the messages that wait for one. */
@@ -323,7 +328,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
-  return { runtime, ctx, directory, agents, tools, deliveries, relays, cards, candidates, evalSession, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
+  return { runtime, ctx, directory, agents, tools, deliveries, relays, cards, candidates, evalSession, runTool, route, acceptedTicket, api, controller, subprocess, hooks, failures, resolveDefault, stop,
     jobs, subagents, step, claim, review, finishReview, reviews }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

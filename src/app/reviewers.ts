@@ -2,7 +2,7 @@
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { REVIEW_ROUNDS, liveTicket, pendingReview, reviewRound, type ReviewRequest, type ReviewReport, type ReviewerPort, type Ticket }
+import { REVIEW_ROUNDS, liveTicket, pendingReview, type ReviewRequest, type ReviewReport, type ReviewerPort, type Ticket }
   from '../core/index.ts'
 import { runAsWorker } from '../infra/environment.ts'
 import { isReviewerSession, reviewerSessionId, reviewTitle } from '../executor/dsh.ts'
@@ -69,6 +69,8 @@ export interface ReviewerSessions {
  */
 export class Reviewers implements ReviewerPort, ReviewerSessions {
   private readonly running = new Map<string, Agent>()
+  /** Reviews whose deploy phase still runs, by Session id: their turn ending is not the verdict. */
+  private readonly deploying = new Set<string>()
   /** What each running review's Session was told to review, by its Session id, for a test's `reviewed`. */
   private readonly told = new Map<string, { ticketId: string; round: number }>()
   answer: ReviewerSessions['answer']
@@ -123,13 +125,23 @@ export class Reviewers implements ReviewerPort, ReviewerSessions {
       if (answered) { await this.apply(sessionId, answered); this.running.delete(sessionId); return }
       await this.host.sessions.prompt(sessionId, `review:${ticketId}:${round}`, text, 'queue')
       // Everything that holds the verdict back goes on beside the review's own turn rather than before it: a review waiting on
-      // a deploy, a model call or a check still ends with its turn, so the host can stop.
+      // a deploy, a model call or a check still ends with its turn, so the host can stop. While the deploy phase runs, the
+      // turn ending without a verdict must not settle the review first: a deploy failure then has no review left to record
+      // it on, and its finding, the reason the result is not on the test environment, is lost.
       const deploy = this.host.deploy()
-      if (deploy) void (async () => {
-        // The deploy phase runs before the verdict, in the ticket's own directory; a failure is the review's finding.
-        const failure = await this.ran(ticketId, deploy)
-        if (failure) return this.apply(sessionId, failure)
-      })().finally(() => { this.host.effects.enqueue('review-verdict', sessionId, { sessionId }) })
+      if (deploy) {
+        this.deploying.add(sessionId)
+        void (async () => {
+          // The deploy phase runs before the verdict, in the ticket's own directory; a failure is the review's finding.
+          const failure = await this.ran(ticketId, round, deploy)
+          if (failure) this.apply(sessionId, failure)
+        })().catch((error: unknown) => {
+          if (!this.host.closing()) this.unfinished(ticketId, round, `the deploy phase failed: ${String(error)}`)
+        }).finally(() => {
+          this.deploying.delete(sessionId)
+          this.host.effects.enqueue('review-verdict', sessionId, { sessionId })
+        })
+      }
     } catch (error) {
       this.running.delete(reviewerSessionId(ticketId, round))
       if (this.host.closing() || error instanceof Later) throw error
@@ -138,15 +150,16 @@ export class Reviewers implements ReviewerPort, ReviewerSessions {
     }
     await agent.whenIdle()
     this.running.delete(sessionId)
-    // A turn that ends without a verdict cannot pass the result: it waits for a person, as an unfinished review does.
-    this.unfinished(ticketId, round, 'the Reviewer ended its turn without a verdict')
+    // A turn that ends without a verdict cannot pass the result: it waits for a person, as an unfinished review does — but a
+    // review whose deploy phase is still running has not run its last check, so it waits for that outcome instead.
+    if (!this.deploying.has(sessionId)) this.unfinished(ticketId, round, 'the Reviewer ended its turn without a verdict')
   }
   /**
    * Deploys the ticket's branch with `command`, then runs its end-to-end checks with `e2e`, in the ticket directory with the
    * ticket's execution environment. A run that fails, or that a person stopped, goes back as the review's finding, with the
    * command's output as its evidence; a run whose checks pass is noted on the ticket and the review goes on.
    */
-  private async ran(ticketId: string, deploy: { command: string; e2e: string }): Promise<ReviewReport | undefined> {
+  private async ran(ticketId: string, round: number, deploy: { command: string; e2e: string }): Promise<ReviewReport | undefined> {
     const ticket = this.host.store.tickets.get(ticketId)
     if (!ticket) return { outcome: 'returned', summary: 'The ticket went away before its result could be deployed.', unfinished: true }
     const commands: { name: string; script: string }[] = [
@@ -169,7 +182,9 @@ export class Reviewers implements ReviewerPort, ReviewerSessions {
           findings: [`The ${step.name} command \`${step.script}\` failed: ${String(error).slice(-3000)}`] }
       }
     }
-    this.host.note(ticketId, `The deploy phase ran for review ${reviewRound(ticket)}:\n${notes.join('\n\n')}`.slice(0, DEPLOY_NOTE_CHARS))
+    // The review is already recorded on the ticket by the time its deploy phase runs, so `reviewRound` would name the next
+    // round rather than this one; the caller's round is the review the note belongs to.
+    this.host.note(ticketId, `The deploy phase ran for review ${round}:\n${notes.join('\n\n')}`.slice(0, DEPLOY_NOTE_CHARS))
     return undefined
   }
   async reviewed(sessionId: string, report: ReviewReport): Promise<void> {
