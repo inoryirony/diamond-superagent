@@ -55,4 +55,13 @@ export const KV = {
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
+  /**
+   * DingTalk Source: known conversations with the peer's open DingTalk ID, whether they are direct and their name; per-conversation
+   * history cursor; per-conversation map from message ID to the root of its thread; and the conversation's latest episode (its root
+   * message and the time of its last message, in milliseconds), which groups messages that follow one another closely.
+   */
+  dingtalk: { chats: record<Record<string, { peerOpenId: string; direct: boolean; name: string }>>('dingtalk-chats'),
+    history: family<string, [conversation: string]>('dingtalk-history:'),
+    roots: family<Record<string, string>, [conversation: string]>('dingtalk-roots:'),
+    episodes: family<{ rootId: string; lastAt: number }, [conversation: string]>('dingtalk-episodes:') },
 }

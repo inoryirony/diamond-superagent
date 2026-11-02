@@ -1,8 +1,12 @@
 /** Structured startup and configuration errors with the settings location where the operator can fix them. */
 import { fill } from './infra/text.ts'
 
-export type SetupPlace = 'deployment' | 'github' | 'feishu'
+export type SetupPlace = 'deployment' | 'github' | 'feishu' | 'dingtalk'
 export const SETUP_PROBLEMS = {
+  dingtalkCliUnset: ['dingtalk', 'The DingTalk Source names no dws CLI.'],
+  dingtalkSelfUnset: ['dingtalk', 'The DingTalk Source names no open DingTalk ID of your own account.'],
+  dingtalkCliMissing: ['dingtalk', 'The DingTalk dws CLI was not found.'],
+  dingtalkSignedOut: ['dingtalk', 'The DingTalk dws CLI is not signed in; sign in with dws auth login.'],
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
   gitTooOld: ['deployment', 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
   environmentFailed: ['deployment', 'Preparing the agent environment failed.'],
