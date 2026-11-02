@@ -33,7 +33,7 @@ export interface Candidate {
   triggers: Trigger[]
   strength: Strength
   policyVersion: string
-  /** Every ticket on the thread, including ended ones, for duplicate judgement. */
+  /** Every live ticket, on any thread, and the ended ones of this thread, for duplicate and relation judgement. */
   tickets: Ticket[]
 }
 
@@ -98,6 +98,8 @@ export interface DomainEvents {
   'trigger.requeued': { triggerId: string }
   /** A person's follow-up that reached tickets and that an earlier version also queued for Eval left the queue. */
   'trigger.followup': { triggerId: string }
+  /** A Trigger queued on a Thread whose Eval is in progress; it waits for the next Eval unless that Eval's Session routes it. */
+  'trigger.queuedBehindEval': { triggerId: string; evalId: string }
   'policy.changed': { from: string; to: string }
 }
 export type DomainEvent = { [K in keyof DomainEvents]: { type: K; at: string; data: DomainEvents[K] } }[keyof DomainEvents]

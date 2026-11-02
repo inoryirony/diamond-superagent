@@ -58,8 +58,8 @@ export interface AssessorHost {
   paused(): boolean
   /** Thread context reader for `trigger`'s Source, or `undefined` when the Source has none. */
   threadContext(trigger: Trigger): TriggerContext | undefined
-  /** Delivers a candidate card to the main Session once per request ID, resolving after the Session receives it. */
-  deliver(requestId: string, text: string): Promise<void>
+  /** Delivers a candidate card to the Session that assesses `evalId` once per request ID, resolving after the Session receives it. */
+  deliver(evalId: string, requestId: string, text: string): Promise<void>
   candidateCard(candidate: Candidate): Promise<Record<string, unknown>>
 }
 
@@ -82,9 +82,9 @@ export const EvalReadSchema = z.object({
 export type EvalRead = z.infer<typeof EvalReadSchema>
 
 /**
- * Implements the `Engine` `Assessor` port for proactive candidate evaluation in the main Session.
- * Relays each evaluation's candidate card to the main Session through the durable `assessment` effect, serves bounded `TriggerContext` and repository reads while the evaluation runs, and converts the main Session's assessment into an `AssessmentOutcome` for `Engine.decide`.
- * Depends on `SourceRegistry` (via `AssessorHost`) for source-specific thread context and on `Sessions` for deduplicated candidate delivery; the main Session's `orchestrator_eval*` tools call `context`, `read`, and `decide`.
+ * Implements the `Engine` `Assessor` port for proactive candidate evaluation, one orchestrator Session per Eval.
+ * Relays each evaluation's candidate card to its Eval Session through the durable `assessment` effect, serves bounded `TriggerContext` and repository reads while the evaluation runs, and converts the Session's assessment into an `AssessmentOutcome` for `Engine.decide`.
+ * Depends on `SourceRegistry` (via `AssessorHost`) for source-specific thread context and on `Sessions` for deduplicated candidate delivery; the Eval Session's `orchestrator_eval*` tools call `context`, `read`, and `decide`.
  */
 export class MasterAssessor implements Assessor {
   /** Per-evaluation read caches and thread contexts, keyed by `evalId`. */
@@ -92,11 +92,11 @@ export class MasterAssessor implements Assessor {
   private readonly controller = new AbortController()
   /** Registers the handler that relays each Eval's candidate card, which a link lookup may delay for seconds. */
   constructor(private readonly host: AssessorHost) {
-    // Start the evaluation deadline only after the main Session receives the candidate card, so a busy Session does not consume evaluation time.
+    // Start the evaluation deadline only after the Eval's Session receives the candidate card, so creating a busy Session does not consume evaluation time.
     host.effects.handle('assessment', async ({ triggerId }, evalId) => {
       const candidate = this.host.engine.candidate(triggerId)
       if (candidate?.evalId !== evalId) return
-      await this.host.deliver(`candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) }))
+      await this.host.deliver(evalId, `candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) }))
       this.host.engine.candidateDelivered(evalId)
     }, { limit: () => host.paused() ? 0 : 4 })
   }

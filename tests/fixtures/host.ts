@@ -261,15 +261,22 @@ export async function startRuntime(seed?: (store: Store) => void) {
   /** Parsed JSON payloads delivered to `sessionId`. */
   const relays = (sessionId: string) => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId === sessionId)
     .map(call => JSON.parse(call.text) as Record<string, unknown>)
-  const candidates = () => relays(runtime.masterId).filter(item => item.kind === 'candidate').map(item => item.trigger_id)
+  /** Candidate cards, oldest first, each delivered to its own Eval Session. */
+  const cards = () => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId.startsWith('eval-'))
+    .map(call => JSON.parse(call.text) as Record<string, unknown>).filter(item => item.kind === 'candidate')
+  const candidates = () => cards().map(item => item.trigger_id)
+  /** The Eval Session that last received the candidate card of `triggerId`, else the main Session, which routes explicit requests too. */
+  const evalSession = (triggerId: string) => deliveries.mock.calls.map(([call]) => call)
+    .filter(call => call.sessionId.startsWith('eval-') && (JSON.parse(call.text) as { trigger_id?: string }).trigger_id === triggerId).at(-1)?.sessionId ?? runtime.masterId
   const runTool = async (sessionId: string, name: string, args: unknown) => {
     const tool = tools.get(sessionId)?.get(name)
     if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
     return await tool.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
   }
-  /** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
+  /** Route one decision with orchestrator_route in the Session that holds its candidate, answering its result; a refused one throws its reason. */
   async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
+    const sessionId = typeof item.trigger_id === 'string' ? evalSession(item.trigger_id) : runtime.masterId
+    const { results } = await runTool(sessionId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
     if (results[0]!.refused) throw new Error(String(results[0]!.refused))
     return results[0]!
   }
@@ -293,7 +300,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
-  return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
+  return { runtime, ctx, directory, agents, tools, deliveries, relays, cards, candidates, evalSession, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
     jobs, subagents, step, claim }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

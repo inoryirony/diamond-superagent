@@ -293,15 +293,16 @@ const ROUTES: readonly Route[] = [
 ]
 
 /**
- * Read a paginated resource for the main Session or a ticket's worker Session.
+ * Read a paginated resource for an orchestrator Session (`reader.sessionId`, the main Session by default) or a ticket's worker Session (`reader.ticketId`).
  * Legacy prefixes (`event/`, `task/`, `observation/`) remain accepted so references in older Session history stay readable.
  */
-export async function readResource(host: ResourceHost, resource: string, offset: number, limit: number | undefined, ticketId?: string,
-  signal?: AbortSignal) {
+export async function readResource(host: ResourceHost, resource: string, offset: number, limit: number | undefined,
+  reader: { ticketId?: string; sessionId?: string } = {}, signal?: AbortSignal) {
+  const { ticketId } = reader
   const name = resource.replace(/^event\//, 'trigger/').replace(/^task\//, 'ticket/').replace(/^observation\//, 'decision/')
   const route = ROUTES.find(([route]) => route.endsWith('/') ? name.startsWith(route) : name === route)
   if (!route) throw new Error('Unknown context resource')
-  const sessionId = ticketId ? workerSessionId(ticketId) : host.masterId
+  const sessionId = ticketId ? workerSessionId(ticketId) : reader.sessionId ?? host.masterId
   const rest = route[0].endsWith('/') ? name.slice(route[0].length) : ''
   return route[1]({ host, resource: name, rest, offset, sessionId, ...limit ? { limit } : {}, ...ticketId ? { ticketId } : {},
     ...signal ? { signal } : {} })

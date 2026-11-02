@@ -146,7 +146,7 @@ If revalidation fails, the Ticket stays ended and takes none of its waiting mess
 
 ## When Eval does not finish
 
-The time limit starts when the candidate reaches the main Session. Time spent waiting for delivery does not count, and an undelivered candidate never expires.
+The time limit starts when the candidate reaches the Eval's Session. Time spent waiting for delivery does not count, and an undelivered candidate never expires.
 
 An expired Eval queues its Triggers for another attempt. After two consecutive retries, the third expiry records `unavailable`. An assessment failure also records `unavailable`; a later Trigger can start a new Eval. A Policy change or a decision made against an outdated Policy records `unavailable` and immediately queues the batch under the current version.
 

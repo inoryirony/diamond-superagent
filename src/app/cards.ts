@@ -104,3 +104,14 @@ export function relatedTickets(tickets: readonly Ticket[]) {
   const ended = tickets.filter(ticket => ticket.ended).sort(newest).slice(0, ENDED_TICKET_CARDS)
   return { related_tickets: [...open, ...ended].map(ticketCard), tickets_total: tickets.length }
 }
+/** The card an Eval's Session gets when another message arrives on the Thread it assesses. */
+export function followupWhileAssessing(trigger: Trigger) {
+  return { kind: 'followup_while_assessing', trigger: triggerCard(trigger),
+    note: 'This message arrived on the same thread while you assess. Route it now with orchestrator_route (attach, ignore or accept), or answer it with orchestrator_reply and route ignore; otherwise it is assessed separately after your decision.' }
+}
+/** A short Session title for an Eval: the text of its first Trigger. */
+export function evalTitle(store: { threads: { active(): readonly { evaluating?: { id: string; triggerIds: string[] } }[] }; triggers: { get(id: string): { text: string } | undefined } }, evalId: string): string {
+  const evaluation = store.threads.active().find(thread => thread.evaluating?.id === evalId)?.evaluating
+  const text = evaluation && store.triggers.get(evaluation.triggerIds[0]!)?.text
+  return `eval ${(text ?? evalId).replace(/\s+/g, ' ').slice(0, 40)}`
+}

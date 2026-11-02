@@ -261,7 +261,8 @@ function collect(host: Host, { a, b, workerA, workerB, refusal }: Awaited<Return
     surfaces.push({ where: `skill ${name}`, owner: PROMPTS, role: 'both', text: `${description}\n${content}` })
   }
   surfaces.push({ where: 'orchestrator tool orchestrator_reply error', owner: ERRORS, role: 'orchestrator', text: refusal })
-  for (const { text } of host.inputs.filter(input => input.sessionId === runtime.masterId)) {
+  // Orchestrator inputs reach the main Session, or an Eval's own Session for its candidate card.
+  for (const { text } of host.inputs.filter(input => input.sessionId === runtime.masterId || input.sessionId.startsWith('eval-'))) {
     const value = JSON.parse(text) as Record<string, unknown>
     const kind = String(value.kind ?? Object.keys(value)[0])
     const owner = kind === 'candidate' ? LINKS : kind === 'worker_attention' ? TOOLS : kind === 'worker_report' ? EXECUTOR : NOTICES

@@ -20,6 +20,13 @@ import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
 
+/** The Session that assesses one Eval: created when its candidate card is delivered, kept afterwards for people to read. */
+export const evalSessionId = (evalId: string): string => `eval-${evalId}`
+/** The Eval a Session assesses, or undefined for the main and worker Sessions. */
+export const evalOfSession = (sessionId: string): string | undefined => sessionId.startsWith('eval-') ? sessionId.slice('eval-'.length) : undefined
+/** Whether a Session runs the orchestrator role: the main Session, which routes and reports, or an Eval's Session, which assesses. */
+export const isOrchestratorSession = (sessionId: string, masterId: string): boolean => sessionId === masterId || evalOfSession(sessionId) !== undefined
+
 /** Host dependencies used by `Sessions`. */
 export interface SessionsHost {
   /** DSH Cordis context: sessions, agents, persistence, and their events. */
@@ -124,7 +131,7 @@ export class Sessions {
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
+        const ours = isOrchestratorSession(sessionId, this.host.masterId) ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
         presets.select(agent, ours).catch(() => {})
@@ -232,7 +239,7 @@ export class Sessions {
   private async decorate(agent: Agent): Promise<void> {
     if (this.bindings.has(agent)) return
     const host = this.host
-    const master = agent.id === host.masterId
+    const master = isOrchestratorSession(agent.id, host.masterId)
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }

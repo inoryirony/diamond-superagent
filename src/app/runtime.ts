@@ -22,7 +22,7 @@ import { environmentOf, ticketEnvironment, type Variable } from './execution-env
 import type { SetupProblem } from '../setup.ts'
 import type { ChannelLinks } from '../sources/kind.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
-import { ticketCard } from './cards.ts'
+import { evalTitle, followupWhileAssessing, ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
@@ -41,7 +41,7 @@ import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
-import { Sessions } from './sessions.ts'
+import { Sessions, evalSessionId } from './sessions.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
@@ -132,7 +132,11 @@ export class Runtime extends Service implements SourceHost {
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
-        deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
+        // Each Eval is assessed in its own orchestrator Session, created on first delivery and kept afterwards for people to read.
+        deliver: async (evalId, id, text) => {
+          await sessions.ensure(evalSessionId(evalId), machine.stateDir, evalTitle(store, evalId), 'orchestrator')
+          await sessions.prompt(evalSessionId(evalId), id, text, 'steer')
+        }, candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
@@ -146,6 +150,13 @@ export class Runtime extends Service implements SourceHost {
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
           if (followup) sessions.relay(followup.id, followup.text)
+          // A message on a Thread under assessment is steered into that Eval's Session, which may route it at once; one it leaves
+          // alone waits for the next Eval, so a Session that does not exist yet or refuses it loses nothing.
+          if (event.type === 'trigger.queuedBehindEval') {
+            const trigger = store.triggers.get(event.data.triggerId)
+            if (trigger) void sessions.prompt(evalSessionId(event.data.evalId), `steer:${trigger.id}`, JSON.stringify(followupWhileAssessing(trigger)), 'steer')
+              .catch((error: unknown) => { ctx.logger.warn('dsh-superagent could not steer trigger %s into Eval %s: %s', trigger.id, event.data.evalId, String(error)) })
+          }
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           const repository = setup.configured() ? setup.deployment.github?.repository : undefined
@@ -232,7 +243,8 @@ export class Runtime extends Service implements SourceHost {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
       this.assessor.stop()
-      const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
+      const ids = [this.masterId, ...this.store.threads.active().flatMap(thread => thread.evaluating ? [evalSessionId(thread.evaluating.id)] : []),
+        ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])

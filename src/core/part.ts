@@ -59,6 +59,7 @@ export abstract class EnginePart {
     if (primary.pending.includes(trigger.id) || primary.evaluating?.triggerIds.includes(trigger.id)) return false
     primary.pending.push(trigger.id)
     this.repo.threads.save(primary)
+    if (primary.evaluating) this.emit('trigger.queuedBehindEval', { triggerId: trigger.id, evalId: primary.evaluating.id })
     return true
   }
   protected emit<K extends keyof DomainEvents>(type: K, data: DomainEvents[K]): void {

@@ -114,21 +114,30 @@ let deliveries: ReturnType<typeof vi.fn<(request: { sessionId: string; mode: 'qu
 const relays = (sessionId: string) => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId === sessionId).map(call => {
   try { return JSON.parse(call.text) as Record<string, unknown> } catch { return { text: call.text } as Record<string, unknown> }
 })
+/** Candidate cards, oldest first, each delivered to its own Eval Session. */
+const cards = () => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId.startsWith('eval-')).map(call => {
+  try { return JSON.parse(call.text) as Record<string, unknown> } catch { return { text: call.text } as Record<string, unknown> }
+}).filter(item => item.kind === 'candidate')
+/** The Eval Session that last received the candidate card of `triggerId`, else the main Session, which routes explicit requests too. */
+const evalSession = (triggerId: string) => deliveries.mock.calls.map(([call]) => call)
+  .filter(call => call.sessionId.startsWith('eval-') && call.text.includes(`"trigger_id":"${triggerId}"`)).at(-1)?.sessionId ?? runtime.masterId
 const MEMBER = 'ou_alice'
 const CHAT = 'oc_team'
 function feishu(id: string, text: string, overrides: Record<string, unknown> = {}): Trigger {
   return feishuTrigger({ message_id: `om_${id}`, chat_id: CHAT, chat_type: 'group', sender_id: MEMBER, sender_type: 'user', content: text, create_time: String(Date.parse('2026-09-09T00:00:00Z') + Number(id.replace(/\D/g, '') || 0) * 1000), mentions: [{ id: 'ou_bot' }], ...overrides }, 'ou_bot', 'cli_bot')!
 }
 const worktreeName = 'fix-regression'
-/** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
+/** Route one decision with orchestrator_route in the Session that holds its candidate, answering its result; a refused one throws its reason. */
 async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
+  const sessionId = typeof item.trigger_id === 'string' ? evalSession(item.trigger_id) : runtime.masterId
+  const { results } = await runTool(sessionId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
   if (results[0]!.refused) throw new Error(String(results[0]!.refused))
   return results[0]!
 }
 async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归')) {
   await receive(trigger)
-  expect(relays(runtime.masterId).some(item => item.trigger_id === trigger.id)).toBe(true)
+  // A message a worker handed back waits for the next pass, up to 2 seconds away, to reach an Eval Session.
+  await vi.waitFor(() => expect(cards().some(item => item.trigger_id === trigger.id)).toBe(true), { timeout: 3000 })
   const result = await route({ kind: 'accept', trigger_id: trigger.id, title: '修复回归',
     worktree_name: worktreeName, acknowledgement: '收到，修复回归。' })
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
@@ -218,7 +227,7 @@ afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await 
 
 it('relays an explicit member mention as a candidate and creates the ticket, acknowledgement, subscription and worker on accept', async () => {
   const { trigger, ticket, sessionId } = await acceptedTicket()
-  const candidate = relays(runtime.masterId).find(item => item.kind === 'candidate')!
+  const candidate = cards().find(item => item.trigger_id === trigger.id)!
   expect(candidate).toMatchObject({ strength: 'explicit', trigger_id: trigger.id, next_action: 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.' })
   expect(ticket).toMatchObject({ title: '修复回归', mandate: { strength: 'explicit', basis: expect.objectContaining({ via: 'addressed', source: 'feishu', sender: 'Alice', addressed: 'mention', scope: expect.objectContaining({ chatId: CHAT }) }) },
     execution: expect.objectContaining({ name: expect.stringMatching(/^fix-regression-/) }), origin: expect.objectContaining({ triggerId: trigger.id }) })
@@ -267,7 +276,7 @@ it('assesses a proactive observation in the orchestrator Session and creates the
   await observe('observe')
   const trigger = feishu('3', '这个文案好奇怪，改成“浏览网页”吧', { mentions: [] })
   await receive(trigger)
-  const candidate = relays(runtime.masterId).at(-1)!
+  const candidate = cards().at(-1)!
   expect(candidate).toMatchObject({ kind: 'candidate', strength: 'inferred', mode: 'observe', next_action: expect.stringContaining('orchestrator_eval') })
   vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_3', chat_id: CHAT }] })
   const details = await runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: trigger.id })
@@ -428,7 +437,7 @@ it('tells live workers about policy changes instead of revoking them and restart
   expect(runtime.store.tickets.get(ticket.id)!.ended).toBeUndefined()
   expect(relays(sessionId)).toEqual([{ text: expect.stringContaining('may no longer start work') }])
   expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_8`)[0]).toMatchObject({ kind: 'unavailable', reason: [{ code: 'policyChanged' }] })
-  expect(relays(runtime.masterId).filter(item => item.kind === 'candidate' && item.trigger_id === pending.id)).toHaveLength(1)
+  expect(cards().filter(item => item.trigger_id === pending.id)).toHaveLength(1)
 })
 
 it('attaches an event to an existing open task through orchestrator_route', async () => {
@@ -460,7 +469,7 @@ it('treats GitHub comments through the same gate: mentions by members are explic
   expect(runtime.store.decisions.byThread('github:7')).toEqual([expect.objectContaining({ kind: 'ignore', reason: [expect.objectContaining({ code: 'not_a_member' })] })])
   const mention = commentTrigger({ id: 2, body: '@agent-bot please fix', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/pull/7#issuecomment-2', created_at: '2026-09-09T00:01:00Z' }, { number: 7, isPr: true }, 'conversation', 'agent-bot')
   await receive(mention)
-  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: mention.id })
+  expect(cards().at(-1)).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: mention.id })
   const result = await route({ kind: 'accept', trigger_id: mention.id, title: 'Fix PR 7', worktree_name: 'fix-pr', acknowledgement: 'On it: fixing the review finding.' })
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
   expect(ticket.channels).toEqual([expect.objectContaining({ source: 'github', address: expect.objectContaining({ number: '7' }) })])
@@ -482,7 +491,7 @@ it('relays an allowed sender\'s mention in a new Issue as an explicit candidate 
   runtime.store.set('github-since', '2026-09-08T23:59:00.000Z')
   await pollRound(runtime.context(githubKind))
   await runtime.idle()
-  const candidate = relays(runtime.masterId).at(-1)
+  const candidate = cards().at(-1)
   expect(candidate).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: key('github-issue', '12'), thread: 'github:12' })
 })
 

@@ -144,8 +144,7 @@ it('relays a message a worker handed back as a candidate with the worker\'s reas
   // The candidate tells the main Session; no requeue notice comes before it.
   const injected = h.agents.get(h.runtime.masterId)!.inject.mock.calls.map(([notice]) => JSON.stringify(notice))
   expect(injected.filter(notice => notice.includes('trigger_requeued'))).toEqual([])
-  expect(h.relays(h.runtime.masterId).find(item => item.kind === 'candidate'
-    && item.trigger_id === message.id)).toMatchObject({ strength: 'explicit',
+  expect(h.cards().find(item => item.trigger_id === message.id)).toMatchObject({ strength: 'explicit',
     handed_back: [{ trigger_id: message.id, ticket_id: ticket.id, reason: 'It asks for an export button.' }] })
   await expect(h.runTool(sessionId, 'orchestrator_trigger_handback', { trigger_id: message.id,
     reason: 'Again' })).rejects.toThrow(/handed that trigger back/)
@@ -255,7 +254,7 @@ it('shows a candidate\'s message as its workers would read it, with the message 
   h.runtime.receive(reply); await h.runtime.idle()
   await h.runTool(sessionId, 'orchestrator_trigger_handback', { trigger_id: reply.id, reason: 'Another change.' })
   await h.runtime.pump(); await h.runtime.idle()
-  const card = h.relays(h.runtime.masterId).find(item => item.kind === 'candidate' && item.trigger_id === reply.id)!
+  const card = h.cards().find(item => item.trigger_id === reply.id)!
   expect(card).toMatchObject({ from: 'ou_alice', text: long.slice(0, 600) + '…', chars: long.length, read: `trigger/${reply.id}`,
     replies_to: { trigger_id: ticket.origin.triggerId, preview: '@bot 修一下回归' } })
   expect(card).not.toHaveProperty('triggers')
