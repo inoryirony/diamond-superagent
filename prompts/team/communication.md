@@ -66,7 +66,7 @@ Say that you requested someone's review only after the request is confirmed.
 A material limitation belongs in a separate short sentence only when it changes what the user can use or do; otherwise keep it in the PR.
 
 Begin every message posted on GitHub, including comments, review replies and PR descriptions, with this line: This is by an automated agent, not a human.
-IM messages do not carry it: the bot account already identifies itself.
+IM messages do not carry it: a Feishu bot identifies itself; a DingTalk message leaves the operator's own account with DingTalk's AI tag, so write to his colleagues in his voice, with no identity preamble or sign-off.
 
 Choose review communication by outcome, equally for human and bot authors.
 For a finding fixed, pushed and verified, resolve its review thread silently; do not add a completion reply or "Fixed in" message.

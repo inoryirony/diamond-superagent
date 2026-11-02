@@ -24,10 +24,10 @@ A dropped acknowledgement will never arrive either: do not resend it elsewhere, 
 Do not scan old history to backfill acknowledgements.
 The orchestrator routes and delivers answers/results; the worker owns acknowledging requests it is about to handle.
 Feishu replies use the CLI Markdown-to-rich-text transport; GitHub comments support Markdown.
-100 words is a hard ceiling, not a writing target.
-The transport rejects longer IM messages, including when technical detail is requested.
+Feishu and GitHub replies have a hard ceiling of 100 words, not a writing target; the transport rejects longer ones.
 Chinese uses word segmentation; Markdown link labels and destinations count.
 Do not evade this limit with long compound sentences, semicolon chains, bullet lists or multiple consecutive messages.
+DingTalk replies are capped at 4000 characters. An answer carries its evidence: name the files, queries or log lines you used, and write the shortest answer that does so.
 Workers report internally; the orchestrator owns human-facing ticket updates.
 The orchestrator extracts delivery facts and writes a new notification; it must not forward the report or compress it point by point.
 Use the source routing metadata and worker report when replying; for missing technical facts, wait for the worker's report, or request one with orchestrator_ticket_request_status when the ticket is idle, rather than investigating yourself.
