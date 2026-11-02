@@ -2,7 +2,7 @@
 import type { EngineForSources, ReceiveResult, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
-import type { SetupProblem } from '../setup.ts'
+import { problemOf, type SetupProblem } from '../setup.ts'
 import type { SourceContext } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Outbox } from './outbox.ts'
@@ -18,10 +18,8 @@ export interface SourceContextDeps {
   readonly deployment: Deployment
   readonly ready: Promise<void>
   configured(): boolean
-  /** Setup problem whose `place` matches the Source kind receives it on `context.problem`. */
-  readonly setupProblem?: SetupProblem | undefined
-  /** Why setup found no Feishu bot even though the Feishu Source names a CLI. */
-  readonly feishuProblem?: SetupProblem | undefined
+  /** Setup problems; the one whose `place` matches the Source kind reaches it on `context.problem`. */
+  readonly problems: readonly SetupProblem[]
   /** Hands a Trigger to the Engine and schedules the pass that assesses it. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
 }
@@ -38,7 +36,7 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     commands: deps.commands,
     ready: deps.ready,
     configured: () => deps.configured(),
-    get problem() { return [deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
+    get problem() { return problemOf(kind.kind, deps.problems) },
     config: <C extends Record<string, unknown>>(id: string) => {
       const instance = deps.sources.instance<C>(id)
       return instance?.enabled ? instance.config : undefined

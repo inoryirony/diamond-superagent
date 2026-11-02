@@ -4,7 +4,7 @@ import type { Deployment } from '../../deployment.ts'
 import type { Health } from '../../sources/host.ts'
 import type { SourceInstance } from '../../sources/kind.ts'
 import type { SourceRegistry } from '../../sources/registry.ts'
-import type { SetupProblem } from '../../setup.ts'
+import { blockingProblem, problemOf as problemIn, type SetupProblem } from '../../setup.ts'
 import { dayAgo, snapshot, type ViewHost } from './records.ts'
 import { preview } from './text.ts'
 
@@ -22,19 +22,17 @@ export function sourceHealth(sources: SourceRegistry, instance: SourceInstance, 
 export interface SetupState {
   /** Resolved deployment facts; undefined while waiting for initial setup. */
   deployment?: Deployment | undefined
-  /** Setup failure that stops all Sources. */
-  problem?: SetupProblem | undefined
-  /** Feishu bot check failure that pauses only the Feishu Source. */
-  feishuProblem?: SetupProblem | undefined
+  /** A `deployment` problem stops all Sources; a Source's own problem pauses only that Source. */
+  problems: readonly SetupProblem[]
 }
-export const problemOf = (id: string, setup: SetupState) => [setup.problem, setup.feishuProblem].find(problem => problem?.place === id)
+export const problemOf = (id: string, setup: SetupState) => problemIn(id, setup.problems)
 /** Source lifecycle state in priority order: missing kind, disabled, setup/part error, blocked on global setup, starting, paused, or ready. */
 export type SourceState = 'missing' | 'off' | 'error' | 'setup' | 'starting' | 'paused' | 'ready'
 function sourceState(instance: SourceInstance & { installed: boolean }, parts: { state: string }[], setup: SetupState): SourceState {
   if (!instance.installed) return 'missing'
   if (!instance.enabled) return 'off'
   if (problemOf(instance.id, setup) || parts.some(part => part.state === 'error')) return 'error'
-  if (setup.problem) return 'setup'
+  if (blockingProblem(setup.problems)) return 'setup'
   if (parts.some(part => part.state === 'starting')) return 'starting'
   return parts.some(part => part.state === 'paused') ? 'paused' : 'ready'
 }

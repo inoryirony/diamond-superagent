@@ -37,3 +37,8 @@ export class SetupError extends Error {
   }
   get problem(): SetupProblem { return { place: this.place, code: this.code, values: this.values, detail: this.message } }
 }
+
+/** Only a `deployment` problem blocks everything; a Source's problem leaves out that Source alone. */
+export const blockingProblem = (problems: readonly SetupProblem[]): SetupProblem | undefined => problems.find(problem => problem.place === 'deployment')
+/** The problem that keeps the Source `id` from running, if any. */
+export const problemOf = (id: string, problems: readonly SetupProblem[]): SetupProblem | undefined => problems.find(problem => problem.place === id)

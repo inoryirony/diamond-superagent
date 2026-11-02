@@ -14,7 +14,7 @@ import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, Source
   TriggerRow } from '../../src/client/api.ts'
 import { SETUP_FIELDS } from '../../src/deployment.ts'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema } from '../../src/policy.ts'
-import { SetupError, type SetupCode } from '../../src/setup.ts'
+import { SetupError, blockingProblem, problemOf as problemIn, type SetupCode } from '../../src/setup.ts'
 import { feishuChannel } from '../../src/sources/feishu-trigger.ts'
 import { githubChannel } from '../../src/sources/github-trigger.ts'
 import { feishuKind } from '../../src/sources/feishu.ts'
@@ -113,18 +113,19 @@ export let server: PanelServer
 
 function resolved() {
   const accounts = server.setup.accounts
-  return accounts ? testDeployment({ repository: accounts.repository, github: { cli: '/bin/false', login: accounts.agent, noreply: '' },
+  return accounts ? testDeployment({ github: accounts.github ? { cli: '/bin/false', login: accounts.github.agent, noreply: '', repository: accounts.github.repository } : undefined,
     ...accounts.feishu ? { feishu: { cli: '/bin/false', ...accounts.feishu } } : { feishu: undefined } }) : undefined
 }
 /** Default source health: paused during setup; Feishu defaults to `socket closed` unless overridden or paused by setup. */
 function healthOf(name: string): Health {
-  if (server.setup.problem) return { state: 'paused', detail: 'Waiting for setup', code: 'setupPending' }
+  if (blockingProblem(server.setup.problems)) return { state: 'paused', detail: 'Waiting for setup', code: 'setupPending' }
   if (server.health[name]) return server.health[name]
   if (name !== 'feishu') return { state: 'ready', detail: '' }
-  return server.setup.feishuProblem ? { state: 'paused', detail: server.setup.feishuProblem.detail } : { state: 'error',
+  const own = problemIn('feishu', server.setup.problems)
+  return own ? { state: 'paused', detail: own.detail } : { state: 'error',
     detail: 'socket closed' }
 }
-const problemOf_ = (id: string) => [server.setup.problem, server.setup.feishuProblem].find(item => item?.place === id) ?? undefined
+const problemOf_ = (id: string) => problemIn(id, server.setup.problems)
 function sourceSettings(): SourceView[] {
   return KINDS.map(kind => {
     const config = kind.schema.parse(server.settings.sources[kind.kind]?.config ?? {})
@@ -147,7 +148,7 @@ function sourceStatuses(): SourceStatusRow[] {
     const enabled = server.settings.sources[kind.kind]?.enabled ?? true
     const health = kind.health.map(name => ({ name, ...healthOf(name) }))
     const problem = problemOf_(kind.kind)
-    const state = !enabled ? 'off' : problem || health.some(item => item.state === 'error') ? 'error' : server.setup.problem ? 'setup'
+    const state = !enabled ? 'off' : problem || health.some(item => item.state === 'error') ? 'error' : blockingProblem(server.setup.problems) ? 'setup'
       : health.some(item => item.state === 'starting') ? 'starting' : health.some(item => item.state === 'paused') ? 'paused' : 'ready'
     const feishu = kind.kind === 'feishu'
     return { id: kind.kind, title: kind.title, installed: true, enabled, state, health, ...problem ? { problem } : {},
@@ -158,7 +159,7 @@ function sourceStatuses(): SourceStatusRow[] {
   })
 }
 const stateView = (): StateView => ({
-  setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
+  setup: server.setup, load: { running: blockingProblem(server.setup.problems) ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
   masterId: 'master', paused: server.settings.paused,
   // The panel does not read health; the service script does.
   health: {},
@@ -177,12 +178,11 @@ const settingsView = (): ApiResponse<'GET settings'> => ({
       en: 'Repository' } }] }] },
 })
 const overviewView = (): ApiResponse<'GET overview'> => {
-  const { problem, feishuProblem } = server.setup
-  const setup = problem ?? feishuProblem
+  const setup = server.setup.problems
   return {
-    problems: [...setup ? [{ kind: 'setup' as const, ...setup }] : [],
+    problems: [...setup.map(item => ({ kind: 'setup' as const, ...item })),
       ...KINDS.some(kind => server.settings.sources[kind.kind]?.enabled !== false) ? [] : [{ kind: 'no-source' as const }],
-      ...feishuProblem || server.settings.sources.feishu?.enabled === false ? [] : [{ kind: 'source-error' as const, source: { id: 'feishu',
+      ...problemIn('feishu', setup) || server.settings.sources.feishu?.enabled === false ? [] : [{ kind: 'source-error' as const, source: { id: 'feishu',
         title: { zh: '飞书', en: 'Feishu' },
         health: { name: 'feishu', state: 'error' as const, detail: 'socket closed' } } }],
       ...server.threads.filter(thread => thread.evaluating && thread.evaluating.deadline < new Date().toISOString())
@@ -248,8 +248,8 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
-    setup: { machine: MACHINE, problem: null, feishuProblem: null,
-      accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
+    setup: { machine: MACHINE, problems: [],
+      accounts: { github: { repository: 'acme/widgets', agent: 'agent-bot' }, feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
     settings, revisions: { policy: 3, eval: 1, executor: 0 },
     prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu', 'github'],
@@ -389,7 +389,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return { revision: server.prompts.revision, context_delivery: 'injected' }
   } },
   'POST prompts/preview': { body: true, answer: ({ body }) => {
-    const skills = [...server.setup.accounts?.feishu ? ['feishu'] : [], 'github', ...Object.keys(body.skills)].map(name => [name,
+    const skills = [...server.setup.accounts?.feishu ? ['feishu'] : [], ...server.setup.accounts?.github ? ['github'] : [], ...Object.keys(body.skills)].map(name => [name,
       composeSkill(body, name)])
     // The generated parts from their templates, without variables or rules.
     const environment = environmentSection(body, []), policy = policySection(SettingsSchema.parse({ policy: { rules: [] } }), body)

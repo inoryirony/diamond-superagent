@@ -87,10 +87,13 @@ def state(url):
             value = json.load(response)
         # Keys omitted by another version read as empty so the service is not mistaken for unreachable.
         health, setup = value.get('health') or {}, value.get('setup') or {}
+        problems = [item for item in (setup.get('problems') or []) if isinstance(item, dict)]
+        blocking = next((item for item in problems if item.get('place') == 'deployment'), None)
+        skipped = next((item for item in problems if item.get('place') == 'feishu'), None)
         entries = {name: entry if isinstance(entry, dict) else {} for name, entry in health.items()}
         return {'health': {name: entry.get('state') for name, entry in entries.items()},
                 'errors': {name: str(entry.get('detail', '')) for name, entry in entries.items() if entry.get('state') == 'error'},
-                'setup': setup.get('problem'), 'feishu': setup.get('feishuProblem')}
+                'setup': blocking, 'feishu': skipped}
     except (OSError, ValueError, AttributeError):
         return None
 

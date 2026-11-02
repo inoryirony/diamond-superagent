@@ -37,7 +37,7 @@ import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets
 
 let runtime: Runtime
 const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.sources, links: value.links() })
-const overviewOf = (value: Runtime) => overview(viewsOf(value), value.health, policyVersion(value.store.settings()), executorLoad(value.store, value.executor.activeCount()), value.setupProblem ?? value.feishuProblem)
+const overviewOf = (value: Runtime) => overview(viewsOf(value), value.health, policyVersion(value.store.settings()), executorLoad(value.store, value.executor.activeCount()), value.problems)
 let directory: string
 let controller: { create: ReturnType<typeof vi.fn>; selectModel: ReturnType<typeof vi.fn>; resolveAgent: ReturnType<typeof vi.fn>; rename: ReturnType<typeof vi.fn>; prompt: ReturnType<typeof vi.fn>; inspect: ReturnType<typeof vi.fn> }
 type RegisteredTool = { name: string; output: { render: (args: unknown, result: unknown) => unknown }; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
@@ -810,19 +810,20 @@ it('leaves waiting and blocked assignments alone after a restart and keeps block
   expect(runtime.store.tickets.get(other.ticket.id)!.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
 })
 
-it('waits for setup without the agent\'s GitHub CLI: the panel works, and nothing is polled, assessed or dispatched', async () => {
+it('waits for setup when git ignores the agent credential configuration: the panel works, and nothing is polled, assessed or dispatched', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'crashed' })
   expect(() => runtime.checkSetup()).toThrow('Setup is complete')
   controller.create.mockClear(); deliveries.mockClear()
-  const next = await restart({}, { github: { cli: '' } })
+  answers = { ...answers, [HELPERS]: 'file:/home/me/.gitconfig\0!gh auth git-credential\0' }
+  const next = await restart()
   await next.ready
   expect(next.configured()).toBe(false)
-  expect(next.setupProblem).toEqual({ place: 'github', code: 'agentCliUnset', values: {}, detail: 'The agent GitHub CLI is not set.' })
+  expect(next.problems).toEqual([{ place: 'deployment', code: 'gitTooOld', values: {}, detail: 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.' }])
   expect(next.health.runtime).toMatchObject({ state: 'paused', code: 'setupPending' })
-  expect(() => next.deployment).toThrow('dsh-superagent is waiting for setup: The agent GitHub CLI is not set.')
-  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problem: { place: 'github' }, accounts: null, machine: { stateDir: directory } } })
-  expect(overviewOf(next).problems[0]).toEqual({ kind: 'setup', ...next.setupProblem })
+  expect(() => next.deployment).toThrow('dsh-superagent is waiting for setup: git does not read the github.com credential configuration')
+  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problems: [{ place: 'deployment' }], accounts: null, machine: { stateDir: directory } } })
+  expect(overviewOf(next).problems[0]).toEqual({ kind: 'setup', ...next.problems[0] })
   await receive(feishu('30', '@bot 修一下'), next)
   // A retry waits for setup instead of launching a worker that cannot run, and no report reaches the orchestrator.
   await next.engine.retryTicket(ticket.id)
@@ -844,7 +845,7 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   const needs = async (place: string, code: string, values: Record<string, string>, accounts: Accounts = {}) => {
     const next = await restart({}, accounts)
     await next.ready
-    expect(next.setupProblem).toMatchObject({ place, code, values })
+    expect(next.problems[0]).toMatchObject({ place, code, values })
   }
   answers[`${AGENT()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":false}\n'
   await needs('github', 'repositoryReadOnly', { account: 'agent-bot', repository: 'acme/widgets' })
@@ -865,7 +866,16 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   await next.ready
   expect(next.configured()).toBe(true)
   expect(next.deployment.feishu).toBeUndefined()
-  expect(next.feishuProblem).toMatchObject({ place: 'feishu', code: 'feishuUserIdentity', values: { mode: 'off' } })
+  expect(next.problems[0]).toMatchObject({ place: 'feishu', code: 'feishuUserIdentity', values: { mode: 'off' } })
+})
+
+it('is configured with no problem when the GitHub Source names neither a repository nor a CLI', async () => {
+  const next = await restart({}, { github: { repository: '', cli: '' } })
+  await next.ready
+  expect(next.configured()).toBe(true)
+  expect(next.problems).toEqual([])
+  expect(next.deployment.github).toBeUndefined()
+  expect(next.health.runtime).toMatchObject({ state: 'ready' })
 })
 
 it('reports a failure to write the agent environment as environmentFailed and leaves this process\'s environment as it was', async () => {
@@ -876,7 +886,7 @@ it('reports a failure to write the agent environment as environmentFailed and le
   const environment = { ...process.env }
   const next = await restart()
   await next.ready
-  expect(next.setupProblem).toMatchObject({ place: 'deployment', code: 'environmentFailed',
+  expect(next.problems[0]).toMatchObject({ place: 'deployment', code: 'environmentFailed',
     values: { output: expect.stringContaining('EEXIST') } })
   expect(process.env).toEqual(environment)
 })
@@ -885,7 +895,7 @@ it('checks only the account a Source save changes, so a problem setup has elsewh
   answers = { ...answers, [`${BOT()} config strict-mode`]: 'strict-mode: off (source: profile)' }
   const next = await restart()
   await next.ready
-  expect(next.feishuProblem).toMatchObject({ code: 'feishuUserIdentity' })
+  expect(next.problems[0]).toMatchObject({ code: 'feishuUserIdentity' })
   next.sources.register(feishuKind); next.sources.register(githubKind)
   answers[`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":true}\n'
   const github = next.settings.block('source:github')
@@ -959,13 +969,13 @@ it('runs setup again while the Feishu bot check failed, and restores the process
   const next = await restart()
   await next.ready
   expect(next.configured()).toBe(true)
-  expect(next.feishuProblem?.code).toBe('feishuUserIdentity')
+  expect(next.problems[0]?.code).toBe('feishuUserIdentity')
   next.checkSetup()
   await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
   answers[HELPERS] = 'file:/home/me/.gitconfig\0!gh auth git-credential\0'
   const broken = await restart()
   await broken.ready
-  expect(broken.setupProblem).toMatchObject({ place: 'deployment', code: 'gitTooOld' })
+  expect(broken.problems).toContainEqual(expect.objectContaining({ place: 'deployment', code: 'gitTooOld' }))
   expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
   expect(process.env.PATH?.split(':')).not.toContain(join(directory, 'worker-bin'))
 })
@@ -995,7 +1005,7 @@ it('waits for setup when the shim directory holds a file dsh-superagent did not 
   const next = await restart()
   await next.ready
   expect(next.configured()).toBe(false)
-  expect(next.setupProblem).toMatchObject({ place: 'deployment', code: 'foreignFile', values: { file: join(directory, 'worker-bin', 'my-script') } })
+  expect(next.problems[0]).toMatchObject({ place: 'deployment', code: 'foreignFile', values: { file: join(directory, 'worker-bin', 'my-script') } })
   expect(readFileSync(join(directory, 'worker-bin', 'my-script'), 'utf8')).toBe('#!/bin/sh\n')
   await next.stop()
 })

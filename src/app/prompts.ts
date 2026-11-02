@@ -135,16 +135,16 @@ export class PromptConflict extends Error {}
 export class Prompts {
   private readonly versions: Versions<PromptVersion>
   constructor(private readonly store: Store, private readonly maxChars: () => number, private readonly environment: () => Variable[] | undefined,
-    private readonly feishu: () => boolean) {
+    private readonly feishu: () => boolean, private readonly github: () => boolean) {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
   compose(config: PromptConfig, role: Role, variables = this.environment()): string {
     return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
   }
-  /** Returns skills to register in every Session: built-in Source skills (`feishu` only when a Feishu bot is configured) followed by team skills. */
+  /** Returns skills to register in every Session: built-in Source skills (`feishu` and `github` only when that Source's account is configured) followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
-    return [...this.feishu() ? ['feishu'] : [], 'github', ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
+    return [...this.feishu() ? ['feishu'] : [], ...this.github() ? ['github'] : [], ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
   }
   current(): PromptVersion {
     const revision = this.versions.revision()

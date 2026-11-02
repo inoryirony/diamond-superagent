@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { usePoll, type Problem } from './api.ts'
 import { Button, Icon } from './controls.tsx'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
+import { blockingProblem } from '../setup.ts'
 import { setupPage, settingsRoute, type Route } from './route.ts'
 import { TicketLine } from './rows.tsx'
 import { healthText, localized, reasonLabel, valueLabel, readableMarkers } from './text.ts'
@@ -93,7 +94,7 @@ export function OverviewPage() {
     </Section>
     <Section title={t('term.executor')} action={more({ page: 'execution' })}>
       {/* Pauses surface in `problems` above, so Executor counts render the same in both states; while setup waits, nothing runs. */}
-      {setup?.problem ? <Hint>{t('executorWaitingSetup')}</Hint> : <div className="dt-stats">
+      {blockingProblem(setup?.problems ?? []) ? <Hint>{t('executorWaitingSetup')}</Hint> : <div className="dt-stats">
         {stat(t('executingLabel'), `${data.executor.running} / ${data.executor.maxWorkers}`)}
         {stat(t('queuedLabel'), data.executor.queued)}
         {stat(t('idleLabel'), data.executor.idle)}

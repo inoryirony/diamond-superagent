@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, machineOf, resolveFeishuBot, resolveGithub, type Machine, type Probe } from '../src/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -58,16 +58,19 @@ describe('configuration schema', () => {
 
 describe('setup', () => {
   it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
-    const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
-    expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })
-    expect(deployment.github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
-    expect(deployment).not.toHaveProperty('feishu')
+    const github = await resolveGithub(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
+    expect(github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com', repository: 'acme/widgets' })
     // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
-    expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
+    expect((await resolveGithub(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path))?.repository).toBe('acme/widgets')
+  })
+  it('finds no GitHub account, and no problem, when the GitHub Source names neither a repository nor a CLI', async () => {
+    expect(await resolveGithub(machine(), {}, probe, path)).toBeUndefined()
+    expect(await resolveGithub(machine(), undefined, probe, path)).toBeUndefined()
+    expect(await resolveGithub(machine(), { repository: '', cli: '' }, probe, path)).toBeUndefined()
   })
   it('names what setup needs and where it is set', async () => {
     const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>
-      expect(resolveDeployment(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
+      expect(resolveGithub(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
     const repository = 'acme/widgets'
     await needs('github', 'repositoryUnset', {}, { cli: 'gh' })
     await needs('github', 'agentCliUnset', {}, { repository })

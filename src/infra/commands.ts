@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
-import type { Deployment } from '../deployment.ts'
+import type { Deployment, GithubAccount } from '../deployment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -63,7 +63,12 @@ export class Commands {
    */
   constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
   get deployment(): Deployment { return this.resolved() }
-  get repository(): string { return this.deployment.repository }
+  /** The agent's GitHub account, which exists only while the GitHub Source is configured and its check passed. */
+  get github(): GithubAccount {
+    const account = this.deployment.github
+    if (!account) throw new Error('The GitHub Source has no working account CLI')
+    return account
+  }
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
   async run(program: string, args: string[], cwd?: string): Promise<string> {
     try {
@@ -73,7 +78,7 @@ export class Commands {
     } catch (error) { throw commandError(error, program) }
   }
   /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
-  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.github.cli, args)) as T }
+  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.github.cli, args)) as T }
   /**
    * Calls the GitHub API on a path within the configured repository, validating JSON output when a schema is provided
    * or returning raw CLI output (such as raw files or `--include` headers) when omitted.
@@ -82,7 +87,7 @@ export class Commands {
   async api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
   async api(path: string, ...flags: string[]): Promise<string>
   async api<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.run(this.deployment.github.cli, ['api', this.path(schema), ...rest])
+    if (typeof schema === 'string') return this.run(this.github.cli, ['api', this.path(schema), ...rest])
     const [path = '', ...flags] = rest
     return schema.parse(await this.gh(['api', this.path(path), ...flags]))
   }
@@ -94,7 +99,8 @@ export class Commands {
   private path(path: string): string {
     const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
     if (outside) throw new Error('GitHub calls are restricted to the configured repository')
-    return path ? `repos/${this.repository}/${path}` : `repos/${this.repository}`
+    const { repository } = this.github
+    return path ? `repos/${repository}/${path}` : `repos/${repository}`
   }
   /**
    * Runs the Feishu bot's `lark-cli` and returns the JSON `data` payload.

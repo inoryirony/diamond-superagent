@@ -12,8 +12,8 @@ import { testDeployment } from './fixtures/deployment.ts'
 const sources = new SourceRegistry(() => SettingsSchema.parse({}))
 sources.register(feishuKind); sources.register(githubKind)
 const send = (commands: Commands, message: OutboundMessage) => sources.send(message, commands)
-const deployment = testDeployment({ github: { ...testDeployment().github, cli: '/path/agent-gh' } })
-const REPOSITORY = deployment.repository
+const deployment = testDeployment({ github: { ...testDeployment().github!, cli: '/path/agent-gh' } })
+const REPOSITORY = deployment.github!.repository
 const reply = { id: 'stable-operation', channel: githubChannel(8), text: 'Done', kind: 'reply' as const }
 describe('account-isolated operations', () => {
   it('uses the agent account\'s GitHub CLI and preserves literal shell metacharacters in argv', async () => {
@@ -114,7 +114,7 @@ describe('Channels', () => {
     expect(gh.mock.calls[1]![0]).toEqual(post)
   })
   it('link each address to its page with its label', () => {
-    const links = { repository: REPOSITORY, feishu: deployment.feishu! }
+    const links = { github: deployment.github!, feishu: deployment.feishu! }
     expect(githubKind.channel!.link(githubChannel(8).address, links)).toEqual({ url: `https://github.com/${REPOSITORY}/issues/8`,
       label: { zh: 'GitHub #8', en: 'GitHub #8' } })
     const review = `https://github.com/${REPOSITORY}/pull/8#discussion_r7`

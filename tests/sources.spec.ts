@@ -40,7 +40,7 @@ function host(overrides: Partial<SourceContextDeps> = {}) {
   const receive = vi.fn(async (trigger: Trigger) => { const result = engine.receive(trigger); engine.evaluateDue(); return result })
   // Record outbound messages in the store without sending them.
   const parts: SourceContextDeps = { store, engine, outbox: { send: message => { store.receipts.add(message) } }, commands, sources, deployment,
-    ready: Promise.resolve(), configured: () => true, receive, ...overrides }
+    ready: Promise.resolve(), configured: () => true, problems: [], receive, ...overrides }
   // The Sources' functions take the context; plugin entries and kind callbacks take the host, which builds each kind's context.
   const value = { ...parts, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(parts, kind) }
   const context = sourceContextOf(parts, { kind: 'feishu', health: ['github', 'feishu', 'history'] })
@@ -89,6 +89,15 @@ function github(h: ReturnType<typeof host>, routes: Record<string, unknown>): st
   return reads
 }
 const bare = (reads: string[]) => reads.map(path => path.split('?')[0])
+describe('github source without an account', () => {
+  it('pauses with githubUnset once setup is done but the GitHub Source has no repository or CLI', async () => {
+    const value = host({ sources: emptyRegistry(), deployment: testDeployment({ github: undefined }) })
+    const disposers: (() => unknown)[] = []
+    applyGithub({ orchestrator: value, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never)
+    await vi.waitFor(() => expect(value.health.github).toMatchObject({ state: 'paused', code: 'githubUnset' }))
+    for (const dispose of disposers) await dispose()
+  })
+})
 describe('feishu source', () => {
   it('registers its kind without a bot, and names on its health what setup still needs', async () => {
     const run = async (overrides: Partial<SourceContextDeps>) => {
@@ -107,7 +116,7 @@ describe('feishu source', () => {
     expect(unset.registered).toBe(feishuKind)
     expect(unset.health).toMatchObject({ feishu: { state: 'paused', code: 'feishuCliUnset' }, history: { state: 'paused', code: 'feishuBotMissing' } })
     const problem = new SetupError('feishuBotNotReady', { app: 'cli_bot', status: 'missing' }).problem
-    const refused = await run({ deployment: testDeployment({ feishu: undefined }), feishuProblem: problem })
+    const refused = await run({ deployment: testDeployment({ feishu: undefined }), problems: [problem] })
     // A failed bot check waits for the operator's fix and a check; it does not retry by itself like a polling error.
     expect(refused.health.feishu).toEqual({ state: 'paused', detail: problem.detail })
     expect((await run({ configured: () => false })).health.feishu).toEqual({ state: 'paused', detail: 'Waiting for the deployment check', code: 'setupPending' })
@@ -974,7 +983,7 @@ describe('source context', () => {
   it('gives each kind the setup problem whose place it is', () => {
     const feishu: SetupProblem = { place: 'feishu', code: 'feishuNoBot', values: {}, detail: 'No bot' }
     const github: SetupProblem = { place: 'github', code: 'agentCliUnset', values: {}, detail: 'No CLI' }
-    const h = host({ feishuProblem: feishu, setupProblem: github })
+    const h = host({ problems: [feishu, github] })
     expect(h.context(feishuKind).problem).toBe(feishu)
     expect(h.context(githubKind).problem).toBe(github)
     expect(h.context({ kind: 'probe', health: [] }).problem).toBeUndefined()
@@ -1076,7 +1085,7 @@ describe('feishu event consumer', () => {
     const deployment = testDeployment({ feishu: { ...testDeployment().feishu!, cli: path } })
     const health = board.all
     const commands = new Commands(() => deployment, {}, controller.signal)
-    const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment, ready: Promise.resolve(), configured: () => true,
+    const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment, ready: Promise.resolve(), configured: () => true, problems: [],
       receive: (trigger: Trigger) => engine.receive(trigger) }
     const turnOff = () => store.saveSettings(SettingsSchema.parse({ sources: { feishu: { enabled: false, config: { chats: [] } } } }))
     return { ctx: sourceContextOf(deps, feishuKind), health, store, turnOff }
