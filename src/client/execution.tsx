@@ -134,6 +134,10 @@ export function ExecutionSettings() {
               placeholder={t('prepareCommandEmpty')} value={value.prepare}
               onChange={event => edit({ prepare: event.target.value })} />
           </Field>
+          <Field label={t('grafanaEnvFile')} hint={t('grafanaEnvFileHint')}>
+            <Input className="dt-mono" value={value.grafanaEnvFile} placeholder={t('grafanaEnvFileEmpty')} spellCheck={false} pattern="/.*"
+              onChange={event => edit({ grafanaEnvFile: event.target.value })} />
+          </Field>
           <EnvironmentVariables groups={environment.variables} sources={sources} onPick={insert} />
           <Field label={t('blockedCommands')} hint={t('blockedCommandsHint')}>
             <Input className="dt-mono" value={value.blockedCommands} placeholder={t('blockedCommandsNone')} spellCheck={false}

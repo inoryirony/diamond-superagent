@@ -95,6 +95,12 @@ export const ExecutorConfigSchema = z.object({
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
   /**
+   * Path to the local file holding the internal Grafana `user=` / `password=` pair that the production log lookup reads. Empty
+   * falls back to `$GRAFANA_ENV_FILE`, then `$DSH_SUPERAGENT_GRAFANA_ENV`, then a path under the operator's home. Settings hold
+   * the path, never the credential, and each operator names their own file instead of inheriting one machine's path.
+   */
+  grafanaEnvFile: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for the default').default(''),
+  /**
    * The phases between a worker's result and its person, in order, each switchable; the Defaults of `docs/003` describe them.
    * `review`: a Reviewer Session judges the result before the ticket delivers it, and returns it to the worker with findings
    * it fails. `deploy`: the review deploys the branch to a test environment and runs its end-to-end checks before passing the

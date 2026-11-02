@@ -125,6 +125,19 @@ A worker's result reaches its person through the stages `executor.reviews` and `
    checks itself. Its ticket branch is the rollback point, so the test environment may break and be repaired; production is the
    only thing the agent never touches.
 
+### What a worker can reach
+
+A ticket directory sits wherever `executor.directory` puts it, and it should sit *inside* the operator's workspace rather than
+in the state directory. The workspace-instruction loader walks from the session's working directory upward, so a directory
+outside the workspace sees no `AGENTS.md` and no sibling repositories — which reads as an agent that cannot use the machine it
+runs on. Point `executor.directory` at a folder inside the workspace and keep `prepare` a plain `mkdir -p "$DSH_SUPERAGENT_DIR"`,
+or use `prepare` to `git worktree add` a checkout there when a ticket needs its own branch.
+
+Two paths are supplied rather than typed into instructions: `DSH_SUPERAGENT_SCRIPTS` is the installed bundle's own `scripts/`
+directory, holding the deploy, end-to-end and production-log scripts, and `DSH_SUPERAGENT_GRAFANA_ENV` is the operator's
+Grafana credential file, set per installation in the panel as **Grafana credential file**. Neither names another machine's home
+directory, so a second operator gets their own without editing prompts.
+
 ### When the rounds are spent
 
 `REVIEW_ROUNDS` (3) returns bound how many times a worker may revise. A result returned in the last round ends nothing by

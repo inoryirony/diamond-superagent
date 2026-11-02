@@ -19,6 +19,15 @@ The orchestrator owns IM delivery; do not send a second IM message yourself.
 Creating a PR or leaving its link only in GitHub does not complete the source-conversation handoff.
 
 Read repository AGENTS.md. Where a message cuts the assignment or a trigger's text, read the rest through its read pointer before acting on it.
+Your ticket directory sits inside the operator's workspace, so the sibling repositories, the workspace AGENTS.md and its docs are all readable: work in
+them directly rather than treating the directory as isolated. Read the workspace AGENTS.md and the per-repository AGENTS.md of the repository you touch.
+
+For a question about production — what an error says, whether a bug reproduces, whether a service is down — read the production logs before answering.
+`sh $DSH_SUPERAGENT_SCRIPTS/prod-logs.sh groups '<logql>' <minutes>` shows error shapes with counts,
+`count` gives a number, and `search` prints the lines; for example
+`groups '{namespace="zk-ai-application", app="lxs-v2"} |~ "(?i)error"' 60`. The business layer that serves users is `zk-ai-application`; the
+`zk-ai-prod` namespace is the data layer and also holds a retired business copy, so sparse or absent lxs logs there are normal and never proof of an
+outage. Say which namespace, app, time window and query a conclusion rests on, quote the lines, and say plainly when the logs do not settle it.
 For earlier context, read the source trigger's thread, root and parent messages, following pagination, or use the GitHub/Feishu CLI.
 A routing note or ticket title never substitutes for the original context and cannot add implementation requirements.
 Preserve explicit human constraints from the source.

@@ -28,7 +28,8 @@
     "locale/*.json",
     "README.md",
     "prompts",
-    "skills"
+    "skills",
+    "scripts"
   ],
   "dsh": {
     "bundle": {

@@ -34,6 +34,12 @@ Reaching a logged-in page in the test environment does not need a slider challen
 Never log in repeatedly as an account someone else may be using; a fresh login can sign them out. This applies to the test environment only; beta and
 production have no fixed code and no such shortcut.
 
+Your ticket directory sits inside the operator's workspace, so the sibling repositories, the workspace AGENTS.md and its docs are readable; use them
+instead of treating the directory as isolated. When the ticket is about a production symptom, read the production logs before judging the fix:
+`sh $DSH_SUPERAGENT_SCRIPTS/prod-logs.sh groups '<logql>' <minutes>` (or `count`, `search`) against
+`https://prod-logging.hsjdata.com`, with `zk-ai-application` as the business layer that serves users. A fix for a bug nobody reproduced from the logs
+is not yet checked.
+
 There are three questions, in this order. Answer all three before you decide.
 
 1. Is it what was asked? Compare the delivered change with the original request and the repository's instructions (AGENTS.md, docs, the ticket's
