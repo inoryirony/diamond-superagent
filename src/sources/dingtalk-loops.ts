@@ -8,6 +8,7 @@ import type { DingtalkAccount } from '../deployment.ts'
 import { dingtalkThreadId, dingtalkTrigger, historyEvent, historyMessages, HistoricalMessageSchema, localTime, SOURCE,
   type DingtalkEvent, type DingtalkThreads } from './dingtalk-trigger.ts'
 import { health, type SourceContext } from './host.ts'
+import { addReaction, CARD_LIMIT_MS, finishCards, sweepReactions } from './dingtalk-channel.ts'
 import type { DingtalkConfig } from './dingtalk.ts'
 import { cursorAt } from './poll.ts'
 
@@ -48,9 +49,14 @@ function rememberChat(ctx: SourceContext, step: DingtalkEvent): void {
   ctx.state.set(KV.dingtalk.chats, chats)
 }
 async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
-  await ctx.receive(trigger)
+  const result = await ctx.receive(trigger)
   const conversationId = String(trigger.meta.conversationId ?? '')
   if (!conversationId) return
+  // A message the Engine took shows the working reaction until the Source answers it; a duplicate or a filtered one never does.
+  if (result === 'stored' && trigger.human && !ctx.problem)
+    await addReaction(ctx, conversationId, String(trigger.meta.messageId ?? '')).catch(error => {
+      ctx.report('dingtalk', { state: 'ready', detail: `Reaction not added: ${String(error)}`, at: new Date().toISOString() })
+    })
   const name = ctx.state.get(KV.dingtalk.chats)?.[conversationId]?.name || conversationId
   const chat = trigger.meta.direct === true ? { value: { zh: '私聊', en: 'Direct message' } } : { value: name }
   for (const ref of trigger.threads) ctx.threads.describe(threadKey(ref), { facts: { chat } })
@@ -162,6 +168,13 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
         await backfillChat(ctx, config, conversationId, chat, since, signal)
         if (!signal.aborted) ctx.state.set(cursorKey, cursorAt(started))
       } catch (error) { if (!signal.aborted) errors.push(`${conversationId}: ${String(error)}`) }
+    }
+    if (!signal.aborted) {
+      // A reply clears its own reaction and card; the sweep only covers thread the Engine dropped without one.
+      for (const conversationId of Object.keys(chats)) {
+        await sweepReactions(ctx, conversationId).catch(() => { /* cosmetic */ })
+      }
+      await finishCards(ctx, CARD_LIMIT_MS).catch(error => errors.push(`cards: ${String(error)}`))
     }
     if (!signal.aborted) ctx.report('history', errors.length
       ? { state: 'error', detail: errors.join('\n') }

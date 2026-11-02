@@ -57,13 +57,17 @@ export const KV = {
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
   /**
    * DingTalk Source: known conversations with the peer's open DingTalk ID, whether they are direct and their name; per-conversation
-   * history cursor; per-conversation map from message ID to the root of its thread; and the conversation's latest episode (its root
-   * message and the time of its last message, in milliseconds), which groups messages that follow one another closely.
+   * history cursor; per-conversation map from message ID to the root of its thread; the conversation's latest episode (its root
+   * message and the time of its last message, in milliseconds), which groups messages that follow one another closely; the messages
+   * still showing the "working on it" reaction; and the streaming card an acknowledgement opened, by conversation.
    */
   dingtalk: { chats: record<Record<string, { peerOpenId: string; direct: boolean; name: string }>>('dingtalk-chats'),
     history: family<string, [conversation: string]>('dingtalk-history:'),
     roots: family<Record<string, string>, [conversation: string]>('dingtalk-roots:'),
-    episodes: family<{ rootId: string; lastAt: number }, [conversation: string]>('dingtalk-episodes:') },
+    episodes: family<{ rootId: string; lastAt: number }, [conversation: string]>('dingtalk-episodes:'),
+    reactions: family<{ messageId: string; at: number }[], [conversation: string]>('dingtalk-reactions:'),
+    /** The card an acknowledgement opened, with its text, waiting for the reply that finishes it. */
+    cards: record<Record<string, { bizId: string; text: string; at: number }>>('dingtalk-cards') },
   /**
    * Jira Source: the `updated` cursor of the issue search, and the Trigger IDs already ingested from each issue (bounded, oldest
    * first) so a re-read of an unchanged issue or comment produces nothing.

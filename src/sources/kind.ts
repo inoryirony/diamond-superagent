@@ -42,15 +42,19 @@ export interface SourcePolicyPart<P extends Record<string, unknown>> {
 /** UI link for a channel address; `triggerId` names the Trigger whose own deep link is preferred when available. */
 export interface ChannelLink { url: string; label: Localized; triggerId?: string }
 export type ChannelLinks = Partial<Pick<Deployment, 'github' | 'feishu' | 'dingtalk' | 'jira' | 'gitlab'>>
+/** The records a Channel keeps between messages (its kind's own KV entries); the Engine reads none of them. */
+export type ChannelState = Pick<SourceContext['state'], 'get' | 'set'>
 /** Outbound messaging adapter for a source kind's threads. */
 export interface SourceChannel<C> {
   /** Whether a reply may still go to `address`; without it, every address may receive replies. */
   allowed?(address: Record<string, string>, config: C): boolean
   /**
    * Sends a message idempotently by ID; returns `'gone'` when the target conversation no longer accepts replies.
+   * A kind may keep its own records through `state` (such as the streaming card an acknowledgement opened), the same store its
+   * loops read; the Engine writes nothing there.
    * @throws when delivery failed but may succeed on a later retry.
    */
-  send(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'>
+  send(host: Pick<SourceContext, 'commands'> & { state: ChannelState }, message: OutboundMessage): Promise<'sent' | 'gone'>
   /** Returns the URL and label for `address`; `url` is empty when `links` lack the required deployment info. */
   link(address: Record<string, string>, links: ChannelLinks): ChannelLink
 }

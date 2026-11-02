@@ -375,7 +375,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/dingtalk.ts` | The DingTalk kind and plugin entry, exported as `./dingtalk-watch`; the operator's own account, so no bot identity |
 | `src/sources/dingtalk-trigger.ts` | DingTalk messages as Triggers, by one rule for live events and history pages; episodes as threads, the noise gate, the operator's own messages |
 | `src/sources/dingtalk-loops.ts` | The DingTalk loops: the `dws event consume` consumer and the history reconciliation of known conversations |
-| `src/sources/dingtalk-channel.ts` | The DingTalk Channel: a direct or an addressed group message as the operator, always `sent` |
+| `src/sources/dingtalk-channel.ts` | The DingTalk Channel: a direct or an addressed group message as the operator, always `sent`; the working reaction, and the streaming card an acknowledgement opens and the reply of its thread finishes |
 | `src/sources/dingtalk-read.ts` | The `dingtalk/` reads of a Trigger's episode, root and parent, and `dingtalkThreadContext` |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |

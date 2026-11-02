@@ -10,10 +10,12 @@ import { sourceContextOf, type SourceContextDeps } from '../src/app/source-conte
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { dingtalkKind } from '../src/sources/dingtalk.ts'
 import { runDingtalk } from '../src/sources/dingtalk-loops.ts'
-import { clip, dingtalkLink, sendDingtalk } from '../src/sources/dingtalk-channel.ts'
+import { addReaction, CARD_LIMIT_MS, clip, dingtalkLink, finishCards, REACTION_LIMIT_MS, sendDingtalk, sweepReactions, WORKING_EMOJI }
+  from '../src/sources/dingtalk-channel.ts'
 import { dingtalkThreadContext } from '../src/sources/dingtalk-read.ts'
 import { dingtalkChannel, dingtalkThreadId, dingtalkTrigger, dingtalkTriggerId, EPISODE_GAP_MS, historyEvent, isNoise, localTime, SOURCE,
   type DingtalkThreads } from '../src/sources/dingtalk-trigger.ts'
+import type { ChannelState } from '../src/sources/kind.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -126,26 +128,32 @@ describe('dingtalk triggers', () => {
 describe('dingtalk channel', () => {
   const deployment = testDeployment({ dingtalk: { cli: '/path/dws', openDingtalkId: SELF, userId: '1735868923313459',
     name: 'Me', corpId: 'ding1' } })
+  /** The Channel's own records, as the store keeps them between messages. */
+  const records = (): ChannelState => {
+    const kept = new Map<string, unknown>()
+    return { get: <V>(name: string) => kept.get(name) as V | undefined,
+      set: <V>(name: string, value: V | undefined) => { if (value === undefined) kept.delete(name); else kept.set(name, value) } }
+  }
   const reply = (direct: boolean): OutboundMessage => ({ id: 'stable-operation', kind: 'reply', text: 'Done',
     channel: dingtalkChannel(CONVERSATION, PEER, 'mid_1', direct) })
   it('answers a direct message as the operator\'s own account, idempotently by the queued reply', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal)
     const dws = vi.spyOn(commands, 'dws').mockResolvedValue({ openTaskId: 'task-1' })
-    expect(await sendDingtalk({ commands }, reply(true))).toBe('sent')
+    expect(await sendDingtalk({ commands, state: records() }, reply(true))).toBe('sent')
     expect(dws).toHaveBeenCalledWith(['chat', 'message', 'send', '--open-dingtalk-id', PEER, '--content', 'Done',
       '--idempotency-key', 'stable-operation', '--format', 'json'])
   })
   it('names the person it answers in a group, since the agent has no bot identity there', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal)
     const dws = vi.spyOn(commands, 'dws').mockResolvedValue({ openTaskId: 'task-2' })
-    await sendDingtalk({ commands }, reply(false))
+    await sendDingtalk({ commands, state: records() }, reply(false))
     expect(dws).toHaveBeenCalledWith(['chat', 'message', 'send', '--conversation-id', CONVERSATION,
       '--at-open-dingtalk-ids', PEER, '--content', `<@${PEER}> Done`, '--idempotency-key', 'stable-operation'])
   })
   it('cuts a long body at 4000 characters and links the Trigger on DingTalk\'s web client', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal)
     const dws = vi.spyOn(commands, 'dws').mockResolvedValue({})
-    await sendDingtalk({ commands }, { ...reply(true), text: 'x'.repeat(4001) })
+    await sendDingtalk({ commands, state: records() }, { ...reply(true), text: 'x'.repeat(4001) })
     const content = (dws.mock.calls[0]![0] as string[])[6]!
     expect(content).toHaveLength(4000)
     expect(content.endsWith('…')).toBe(true)
@@ -153,6 +161,61 @@ describe('dingtalk channel', () => {
     expect(dingtalkLink({ conversationId: CONVERSATION, messageId: 'mid_1' }, {})).toEqual({ url: 'https://im.dingtalk.com/',
       label: { zh: '钉钉消息', en: 'DingTalk message' }, triggerId: dingtalkTriggerId('mid_1') })
     expect(dingtalkLink({ conversationId: CONVERSATION }, {})).not.toHaveProperty('triggerId')
+  })
+  it('opens a streaming card for the acknowledgement and finishes it with the reply of the same thread', async () => {
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    const state = records()
+    const dws = vi.spyOn(commands, 'dws').mockResolvedValueOnce({ data: { bizId: 'card-1' } })
+      .mockResolvedValueOnce({}).mockResolvedValueOnce({})
+    const address = { conversationId: CONVERSATION, peerOpenId: PEER, direct: 'true', messageId: 'mid_1' }
+    expect(await sendDingtalk({ commands, state },
+      { id: 'ack-1', kind: 'acknowledgement', text: 'Looking into it', channel: { source: SOURCE, thread: `dingtalk:${CONVERSATION}`, address } })).toBe('sent')
+    expect(dws.mock.calls[0]![0]).toEqual(['chat', 'message', 'send-card', '--open-dingtalk-id', PEER, '--format', 'json'])
+    expect(dws.mock.calls[1]![0]).toEqual(['chat', 'message', 'update-card', '--biz-id', 'card-1', '--content', 'Looking into it',
+      '--flow-status', '1'])
+    expect(state.get(KV.dingtalk.cards)).toMatchObject({ [`dingtalk:${CONVERSATION}`]: { bizId: 'card-1' } })
+    expect(await sendDingtalk({ commands, state }, reply(true))).toBe('sent')
+    expect(dws.mock.calls[2]![0]).toEqual(['chat', 'message', 'update-card', '--biz-id', 'card-1', '--content', 'Done', '--flow-status', '3'])
+    expect(state.get(KV.dingtalk.cards)).toBeUndefined()
+  })
+  it('finishes a card left open when its ticket ends, keeping the acknowledgement text', async () => {
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    const state = records()
+    state.set(KV.dingtalk.cards, { [`dingtalk:${CONVERSATION}`]: { bizId: 'card-1', text: 'Looking into it', at: 1 } })
+    const dws = vi.spyOn(commands, 'dws').mockResolvedValue({})
+    await finishCards({ commands, state })
+    expect(dws).toHaveBeenCalledWith(['chat', 'message', 'update-card', '--biz-id', 'card-1', '--content', 'Looking into it',
+      '--flow-status', '3'])
+    expect(state.get(KV.dingtalk.cards)).toBeUndefined()
+  })
+  it('marks a message it is working on, and the reply takes the mark off', async () => {
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    const state = records()
+    const dws = vi.spyOn(commands, 'dws').mockResolvedValue({})
+    await addReaction({ commands, state }, CONVERSATION, 'mid_1')
+    expect(dws).toHaveBeenCalledWith(['chat', 'message', 'add-emoji', '--conversation-id', CONVERSATION,
+      '--message-id', 'mid_1', '--emoji', WORKING_EMOJI])
+    expect(state.get(KV.dingtalk.reactions(CONVERSATION))).toHaveLength(1)
+    await sendDingtalk({ commands, state }, reply(true))
+    expect(dws).toHaveBeenCalledWith(['chat', 'message', 'remove-emoji', '--conversation-id', CONVERSATION,
+      '--message-id', 'mid_1', '--emoji', WORKING_EMOJI])
+    expect(state.get(KV.dingtalk.reactions(CONVERSATION))).toBeUndefined()
+  })
+  it('sweeps a reaction and a card that stayed behind after the work was dropped', async () => {
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    const state = records()
+    // A reaction and a card from long ago: nothing will answer them, so the sweep closes both.
+    state.set(KV.dingtalk.reactions(CONVERSATION), [{ messageId: 'mid_1', at: Date.now() - REACTION_LIMIT_MS - 1 }])
+    state.set(KV.dingtalk.cards, { [`dingtalk:${CONVERSATION}`]: { bizId: 'card-1', text: 'Looking into it', at: Date.now() - CARD_LIMIT_MS - 1 } })
+    const dws = vi.spyOn(commands, 'dws').mockResolvedValue({})
+    await sweepReactions({ commands, state }, CONVERSATION)
+    await finishCards({ commands, state }, CARD_LIMIT_MS)
+    expect(dws).toHaveBeenCalledWith(['chat', 'message', 'remove-emoji', '--conversation-id', CONVERSATION,
+      '--message-id', 'mid_1', '--emoji', WORKING_EMOJI])
+    expect(dws).toHaveBeenCalledWith(['chat', 'message', 'update-card', '--biz-id', 'card-1', '--content', 'Looking into it',
+      '--flow-status', '3'])
+    expect(state.get(KV.dingtalk.reactions(CONVERSATION))).toBeUndefined()
+    expect(state.get(KV.dingtalk.cards)).toBeUndefined()
   })
 })
 
