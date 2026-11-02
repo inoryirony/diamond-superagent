@@ -366,7 +366,7 @@ it('reads a trigger once with the message it replies to and the messages around 
   expect(page).not.toHaveProperty('read')
 })
 
-const relaysOf = (kind: string) => h.relays(h.runtime.masterId).filter(item => item.kind === kind)
+const relaysOf = (kind: string) => kind === 'candidate' ? h.cards() : h.relays(h.runtime.masterId).filter(item => item.kind === kind)
 const notices = () => h.agents.get(h.runtime.masterId)!.inject.mock.calls
   .map(([message]) => JSON.parse(message.content.map(block => block.type === 'text' ? block.text : '').join('')) as Record<string, unknown>)
 
@@ -392,11 +392,12 @@ it('shows a candidate with its thread\'s tickets open first, the tickets it reac
   expect((followup.related_tickets as { ticket_id: string }[]).map(card => card.ticket_id)).toEqual([a.id, b.ticket_id])
   expect(followup).toMatchObject({ tickets_total: 2, delivered_to: [a.id], thread: `feishu:${CHAT}:om_1` })
   expect(String(followup.next_action).length).toBeLessThanOrEqual(100)
-  // A message elsewhere that names a pull request reads the tickets that follow it.
+  // A message elsewhere still sees every open ticket, not the ended ones of other threads; a pull request it names adds only tickets not shown already.
   const thread = { key: 'github:123', ref: { source: 'github', id: '123' }, createdAt: '', subscriptions: [a.id], correlated: [], pending: [], meta: {} }
   h.runtime.store.threads.save(thread)
   h.runtime.receive(feishu('4', '@bot 看看 #123 的进展')); await h.runtime.idle()
-  expect(relaysOf('candidate').at(-1)).toMatchObject({ related_tickets: [], tickets_total: 0, referenced_tickets: [{ ticket_id: a.id }] })
+  expect(relaysOf('candidate').at(-1)).toMatchObject({ related_tickets: [{ ticket_id: a.id }], tickets_total: 1 })
+  expect(relaysOf('candidate').at(-1)).not.toHaveProperty('referenced_tickets')
 })
 
 it('relays a worker\'s report with its ticket card and the start of its summary, and a question with the card alone', async () => {

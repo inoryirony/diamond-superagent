@@ -90,7 +90,17 @@ export function textPage(resource: string, text: string, offset: number, limit: 
   const end = Math.min(text.length, offset + limit)
   return { resource, offset, total_chars: text.length, next_offset: end < text.length ? end : null, text: text.slice(offset, end) }
 }
+/** How many live tickets a candidate card carries at most: a hard guard against a flooded board, not an expected count. */
+export const OPEN_TICKET_CARDS = 60
+/** How many ended tickets of the candidate's thread a card carries at most. */
+export const ENDED_TICKET_CARDS = 8
+/**
+ * The tickets a candidate card lists: every live ticket, newest first, then the ended ones of the thread; `tickets_total`
+ * tells when the limits cut some off, which `orchestrator_read` tickets pages through.
+ */
 export function relatedTickets(tickets: readonly Ticket[]) {
-  const order = [...tickets].sort((a, b) => Number(!a.ended) === Number(!b.ended) ? b.createdAt.localeCompare(a.createdAt) : a.ended ? 1 : -1)
-  return { related_tickets: order.slice(0, 8).map(ticketCard), tickets_total: tickets.length }
+  const newest = (a: Ticket, b: Ticket) => b.createdAt.localeCompare(a.createdAt)
+  const open = tickets.filter(ticket => !ticket.ended).sort(newest).slice(0, OPEN_TICKET_CARDS)
+  const ended = tickets.filter(ticket => ticket.ended).sort(newest).slice(0, ENDED_TICKET_CARDS)
+  return { related_tickets: [...open, ...ended].map(ticketCard), tickets_total: tickets.length }
 }

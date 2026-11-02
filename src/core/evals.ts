@@ -238,7 +238,11 @@ export class Evals extends EnginePart {
     const evaluation = thread.evaluating!
     const triggers = evaluation.triggerIds.flatMap(id => { const trigger = this.repo.triggers.get(id); return trigger ? [trigger] : [] })
     const { id: evalId, strength, policyVersion } = evaluation
-    return { evalId, thread, triggers, strength, policyVersion, tickets: this.ticketsOnThread(thread) }
+    // Every live ticket, wherever its thread, so the assessor sees duplicates and related work; ended ones only from this thread.
+    const onThread = this.ticketsOnThread(thread)
+    const seen = new Set(onThread.map(ticket => ticket.id))
+    const tickets = [...onThread, ...this.repo.tickets.open().filter(ticket => !seen.has(ticket.id))]
+    return { evalId, thread, triggers, strength, policyVersion, tickets }
   }
   /**
    * Record that the queued Triggers `ids` of a Thread start no Eval, for `reason`, and take them out of its queue. Its id
