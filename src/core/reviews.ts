@@ -1,12 +1,17 @@
 /** Reviews: a ticket's result goes to a review of its own before the ticket delivers or ends it. */
 import { UserError } from './errors.ts'
-import { latestAssignment, liveTicket, reviewRequired, reviewRound } from './model.ts'
+import { latestAssignment, liveTicket, reviewRequired, reviewRound, reviewsInAttempt } from './model.ts'
 import type { Assignment, Ticket } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { ReviewReport, ReviewerPort } from './ports.ts'
 import type { Tickets } from './tickets.ts'
 
-/** How many review rounds a ticket's results may take before a returned one waits for a person instead of the worker. */
+/**
+ * How many review rounds one attempt at the work may take before a returned result waits for a person instead of going back to
+ * the worker. The bound is per attempt: a review that returns a result gives the worker a new Assignment that revises the same
+ * work, so without it a reviewer and a worker could loop; but a person's follow-up, a retry or the orchestrator acting on the
+ * findings starts a new attempt, which has its own rounds.
+ */
 export const REVIEW_ROUNDS = 3
 
 /**
@@ -62,7 +67,11 @@ export class Reviews extends EnginePart {
     // A review that could not judge the result leaves it for a person: it is delivered as once, not passed on as if judged.
     if (report.unfinished) return this.require(ticketId)
     if (report.outcome === 'passed') { this.tickets.finishReviewed(ticketId, at); return this.require(ticketId) }
-    if (report.findings?.length && review.round < REVIEW_ROUNDS) { this.tickets.returned(ticketId, report); return this.require(ticketId) }
+    // The rounds bound this attempt, counted after this review ended, so the third returned result of an attempt is the last
+    // that goes back to the worker.
+    if (report.findings?.length && reviewsInAttempt(this.require(ticketId)) < REVIEW_ROUNDS) {
+      this.tickets.returned(ticketId, report); return this.require(ticketId)
+    }
     // The rounds are spent with the result still returned: nothing runs on its own any more, so the main Session is told what
     // the reviewer kept finding. It may start the worker again with a narrower instruction or hand the ticket to a person;
     // until it does, the ticket waits at `person / returned`.

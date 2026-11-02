@@ -84,6 +84,9 @@ it('defines the reviewer preset, with the required settings its tools cannot sta
   expect(named('@deepseek-ai/dsh-tool-fs')).toEqual([expect.objectContaining({ write: false, edit: false })])
   // `sampleOverCapGlobResults` has no default in the package; leaving it out failed three reviews in a row.
   expect(named('@deepseek-ai/dsh-tool-fs-search')).toEqual([expect.objectContaining({ sampleOverCapGlobResults: false })])
+  // A preset's compaction group must isolate the services it starts, or the whole Session fails to start.
+  const compaction = plugins.find(row => row.id === 'compaction') as { isolate?: Record<string, unknown> } | undefined
+  expect(compaction?.isolate).toMatchObject({ compaction: true, toolResultPruner: true })
   // It runs the deployment's checks itself, so it needs a shell and the job tools.
   for (const name of ['@deepseek-ai/dsh-tool-bash', '@deepseek-ai/dsh-tool-jobs', '@deepseek-ai/dsh-agent-instructions', '@deepseek-ai/dsh-tool-skill']) {
     expect(named(name).length, name).toBeGreaterThan(0)

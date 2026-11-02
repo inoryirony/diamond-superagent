@@ -230,6 +230,12 @@ export interface Assignment {
    * into a step before, the worker read.
    */
   idleAt?: string
+  /**
+   * Set when a review returned this Assignment's predecessor: the worker revises the same work, so the new Assignment
+   * continues the attempt that was under review and its review rounds carry on. Unset on an Assignment a person's follow-up,
+   * a retry or the orchestrator started, which begins a new attempt with its own rounds.
+   */
+  revises?: true
 }
 
 export type TicketInput =
@@ -345,15 +351,34 @@ export const pendingReview = (ticket: Pick<Ticket, 'reviews'>): TicketReview | u
 /**
  * Whether a ready report of an Assignment asks for a review, or is the result itself: with reviews on, every ready result is
  * reviewed once, and a returned one again until it runs out of rounds; with reviews off, the result is the ticket's.
+ *
+ * The rounds bound one attempt at the work, not the ticket's whole life. They count the reviews since the current Assignment
+ * started, because a new Assignment is a new attempt: a person's follow-up, a retry, or the orchestrator acting on what the
+ * reviewer kept finding each begin one. Counting every review the ticket ever had made those restart paths pointless — the
+ * worker would revise, report ready, and no review would run because an earlier attempt had already spent the budget.
  */
 export const reviewRequired = (ticket: Pick<Ticket, 'reviews' | 'assignments'>, reviews: boolean, rounds: number): boolean => {
   if (!reviews) return false
   const report = latestReport(ticket)
   if (!report) return false
   const reviewed = (ticket.reviews ?? []).some(review => review.at > report.at)
-  return !reviewed && (ticket.reviews ?? []).length < rounds
+  return !reviewed && reviewsInAttempt(ticket) < rounds
 }
-/** The review round a new review of the ticket's latest result is: one more than the reviews it had. */
+/** The Assignment the ticket is on now: the newest one, whose result a review of the current work judges. */
+const currentAssignment = (ticket: Pick<Ticket, 'assignments'>): Assignment | undefined => ticket.assignments.at(-1)
+/**
+ * How many reviews the current attempt has taken. An attempt begins at the newest Assignment a person, a retry or the
+ * orchestrator started, and every Assignment after it that only revises the same work belongs to it.
+ */
+export const reviewsInAttempt = (ticket: Pick<Ticket, 'reviews' | 'assignments'>): number => {
+  const assignments = ticket.assignments
+  let start = assignments.length - 1
+  while (start > 0 && assignments[start]?.revises) start--
+  const attemptIds = new Set(assignments.slice(Math.max(start, 0)).map(assignment => assignment.id))
+  return (ticket.reviews ?? []).filter(review => attemptIds.has(review.assignmentId)).length
+}
+/** The review round a new review of the ticket's latest result is: one more than every review the ticket has had, so a round
+ * number never repeats and the Reviewer Session id built from it stays unique across attempts. */
 export const reviewRound = (ticket: Pick<Ticket, 'reviews'>): number => (ticket.reviews?.length ?? 0) + 1
 /**
  * Whether a Trigger reached a ticket: it started the ticket, came to it as an Input, or is on a Thread the ticket subscribes

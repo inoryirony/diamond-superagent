@@ -51,3 +51,35 @@ it('tells the main Session that a review\'s rounds are spent, and lets it restar
   expect(after.assignments.length).toBe(before + 1)
   expect(after.inputs.some(input => 'text' in input && input.text.includes('Only change src/app.css'))).toBe(true)
 })
+
+it('reviews the result of an assignment the orchestrator restarted, even after an earlier attempt spent its rounds', async () => {
+  h = await startRuntime()
+  const host = h
+  const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  // Spend the three rounds of the first attempt: every review returns the result.
+  host.review({ outcome: 'returned', summary: 'Still wrong.', findings: ['src/app.css: still does not wrap.'] })
+  for (const round of [1, 2, 3]) {
+    await host.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: `Attempt 1 round ${round}.` })
+    await vi.waitFor(() => expect(host.runtime.reviewers.agent(ticket.id, round)).toBeDefined(), { timeout: 5000 })
+    await host.finishReview(ticket.id)
+    await host.runtime.idle()
+    if (round < 3) { host.step(sessionId); await host.runtime.idle() }
+  }
+  expect(ticketOf(host, ticket.id).reviews!.map(review => review.ended?.outcome)).toEqual(['returned', 'returned', 'returned'])
+  // The rounds are spent, so nothing runs on its own. The orchestrator restarts the worker with an instruction; that is a new
+  // attempt, so its result asks for a review again instead of being delivered unreviewed.
+  await host.runTool(host.runtime.masterId, 'orchestrator_ticket_restart',
+    { ticket_id: ticket.id, instruction: 'Only change src/app.css.' })
+  await host.runtime.idle()
+  const restarted = ticketOf(host, ticket.id).assignments.at(-1)!
+  expect(restarted.revises).toBeUndefined()
+  await host.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Attempt 2 done.' })
+  // Round 1 of the new attempt, in a Session of its own, rather than no review at all.
+  await vi.waitFor(() => expect(ticketOf(host, ticket.id).reviews).toHaveLength(4), { timeout: 5000 })
+  // The round number stays unique across attempts, because the Reviewer Session id is built from it.
+  expect(ticketOf(host, ticket.id).reviews!.at(-1)!.round).toBe(4)
+  // The new attempt's review waits for its verdict; the host finishes it with one.
+  await host.runtime.idle()
+  await host.finishReview(ticket.id, { outcome: 'passed', summary: 'Attempt 2 checked: wraps.' })
+  await vi.waitFor(() => expect(ticketOf(host, ticket.id).ended).toMatchObject({ outcome: 'completed' }), { timeout: 5000 })
+})

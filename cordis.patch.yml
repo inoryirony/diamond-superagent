@@ -192,6 +192,11 @@
           - id: compaction
             name: cordis:group
             group: true
+            # The pruner and compaction are services a preset must isolate; without this the whole Reviewer Session fails
+            # to start with "Preset services require isolate realms: toolResultPruner".
+            isolate:
+              compaction: true
+              toolResultPruner: true
             config:
               - id: compaction-basic
                 name: '@deepseek-ai/dsh-compaction-basic'

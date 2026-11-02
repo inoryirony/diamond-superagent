@@ -140,8 +140,14 @@ directory, so a second operator gets their own without editing prompts.
 
 ### When the rounds are spent
 
-`REVIEW_ROUNDS` (3) returns bound how many times a worker may revise. A result returned in the last round ends nothing by
+`REVIEW_ROUNDS` (3) returns bound how many times a worker may revise **within one attempt**. A result returned in the last round ends nothing by
 itself: the engine emits `ticket.reviewRoundsSpent` with the reviewer's findings, and the main Session receives it as a notice.
+The bound is per attempt, not per ticket: a review that returns a result gives the worker a new Assignment marked `revises`,
+which continues the same attempt, but a person's follow-up, a retry or `orchestrator_ticket_restart` starts a new attempt with
+its own rounds. Counting every review the ticket ever had made those restart paths useless — the worker would revise, report
+ready, and no review would run because an earlier attempt had spent the budget. Round numbers stay unique across attempts,
+because the Reviewer Session id is built from the round.
+
 That is deliberate — the orchestrator, not the worker, sees the pattern across rounds, so it is the one that can narrow the
 scope, correct an approach, or point at the code the worker kept missing. `orchestrator_ticket_restart` starts a fresh
 assignment whose first input is that instruction; leaving the ticket alone leaves it at `person / returned` for a person.

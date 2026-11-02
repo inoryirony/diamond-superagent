@@ -405,8 +405,9 @@ export class Tickets extends EnginePart {
     return report?.state !== 'ready' || ticket.undelivered.length > 0 || later
   }
   /** Add a pending Assignment; a failed delivery to the one before it no longer concerns the ticket. */
-  private newAssignment(ticket: Ticket): Assignment {
-    const assignment: Assignment = { id: key('assignment', ticket.id, String(ticket.assignments.length)), state: 'pending', createdAt: this.now() }
+  private newAssignment(ticket: Ticket, revises = false): Assignment {
+    const assignment: Assignment = { id: key('assignment', ticket.id, String(ticket.assignments.length)), state: 'pending', createdAt: this.now(),
+      ...revises ? { revises: true as const } : {} }
     ticket.assignments.push(assignment)
     delete ticket.delivery
     return assignment
@@ -450,7 +451,8 @@ export class Tickets extends EnginePart {
     if (!latest) throw new UserError('unknownAssignment')
     this.endAssignment(ticket, latest, 'returned')
     this.requeueUntaken(ticket, latest)
-    const assignment = this.newAssignment(ticket)
+    // It revises the same work, so the review rounds of this attempt carry on rather than starting over.
+    const assignment = this.newAssignment(ticket, true)
     const at = this.now()
     const text = [`The review returned this ticket's result; revise the same work and report ready again.`, report.summary,
       ...(report.findings?.length ? ['', ...report.findings.map((finding, index) => `${index + 1}. ${finding}`)] : [])].join('\n')
