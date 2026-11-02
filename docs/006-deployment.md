@@ -68,6 +68,14 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
 
+### Jira account (optional)
+
+1. Create a Personal Access Token for the agent's Jira account at `https://<jira>/secure/ViewProfile.jspa` → Personal Access Tokens (Jira Server 9.12 reads it from `Authorization: Bearer <token>`).
+2. Put the token in the environment of the dsh-superagent process under a name you choose, for example `JIRA_AGENT_PAT`, and set that name as the Source's token variable. The token itself is never written to settings or to the state directory, is not passed to worker Sessions, and does not appear in the API's answers.
+3. In **Sources**, set the Jira base URL (`https://issue.example.com`, no path) and the variable name. A save checks `GET /rest/api/2/myself` with the token; a failure disables only the Jira Source, and the setup problem names what to fix.
+
+Workers cannot read Jira: the token stays in the host process. They read the issue and its comments through `orchestrator_read`, and answer through `orchestrator_reply` or `orchestrator_report`, which the host posts back as a comment on the issue.
+
 ## Install
 
 Run this block once, on a machine that has no `superagent` profile yet:
@@ -145,6 +153,8 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
 1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+
+   For Jira, set the base URL, the token variable, the projects to watch, and whether new Issues and comments that do not address the agent are received.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 

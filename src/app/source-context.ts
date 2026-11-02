@@ -41,6 +41,8 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       const instance = deps.sources.instance<C>(id)
       return instance?.enabled ? instance.config : undefined
     },
+    // The Policy's `bots` rows for this kind are its only bot list; the registry validates them against the kind's schema.
+    bots: () => (deps.sources.policyPart(kind.kind) as { bots?: { id: string }[] } | undefined)?.bots?.map(bot => bot.id) ?? [],
     receive: trigger => deps.receive(trigger),
     atomic: work => store.atomic(work),
     state: {
