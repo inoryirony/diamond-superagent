@@ -10,6 +10,8 @@ usePanel()
 it('opens the Decisions under Policy from the flow line with their reasons, Decisions that start work first, filterable by kind',
   async () => {
   await mount()
+  // The flow line sits in the folded engine half of the overview.
+  await click(all('.dt-disclosure-row')[0]!)
   await click(all('.dt-stat button')[1]!)
   expect(tab(zh['tab.eval']).getAttribute('aria-selected')).toBe('true')
   expect(server.requests.some(request => request.path === 'decisions?limit=30&kind=accept,reopen&window=24h')).toBe(true)

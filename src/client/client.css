@@ -380,3 +380,28 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
 .dt-admission-slot { display: inline-flex; flex: none; width: 16px; }
 .dt-info-warn { color: var(--dsw-alias-state-warn-primary); }
 .dt-field-segmented { max-width: 240px; }
+
+/* The overview's one-line summary, above the three boards it counts. */
+.dt-board-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 18px;
+  margin: 0 0 4px;
+}
+
+.dt-board-count {
+  color: var(--muted, #6b7280);
+  font-size: 13px;
+}
+
+.dt-board-count b {
+  color: var(--text, #111827);
+  font-size: 15px;
+  margin-left: 4px;
+}
+
+.dt-board-problems {
+  color: var(--danger, #b42318);
+  font-size: 13px;
+}

@@ -6,18 +6,28 @@ import { usePanel, mount, remount, all, find, tab, click, text } from './fixture
 import { server, droppedReply, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
-it('leads the overview with the pending Tickets, then problems, the last day and the Executor, each linking to its stage', async () => {
+/** Opens the folded engine half of the overview, where problems, the last day's counts and the Executor's slots sit. */
+const openAdvanced = async () => { await click(all('.dt-disclosure-row')[0]!) }
+it('leads the overview with what needs a person, then what runs and what finished, and folds the engine views away', async () => {
   await mount()
   expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')
   expect(all('[role="tab"]').map(tab => tab.textContent)).toEqual(['概览', '来源', '触发', '评估', '执行', '设置'])
-  expect(all('.dt-section-title').map(title => title.textContent)).toEqual(['待处理工单2', '系统问题2', '过去 24 小时详情 ›', '执行器详情 ›'])
-  expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual(['待回答', '待处理失败'])
+  // One line says what needs the person, then the three boards; the machine's own numbers are behind the disclosure.
+  // The fixture has one Ticket the Executor works on and one it finished, each shown as its own row rather than a count alone.
+  expect(all('.dt-section-title').map(title => title.textContent)).toEqual(['需要你处理2', '进行中1', '刚完成1'])
+  expect(all('.dt-board-count').map(item => item.textContent)).toEqual(['需要你处理 2', '进行中 1', '刚完成 1'])
+  // Every board lists its own Tickets, and the advanced half stays closed until it is opened.
+  expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual(['待回答', '待处理失败', '执行中', '人工停止'])
+  expect(all('.dt-section-title').map(title => title.textContent)).not.toContain('更多数据与引擎视图')
+  await openAdvanced()
+  expect(all('.dt-section-title').map(title => title.textContent)).toContain('系统问题2')
   expect(all('.dt-cards .dt-att-what').map(item => item.textContent)).toEqual(['飞书 来源异常', '评估未完成：这个文案好奇怪'])
   // Actions sit below the title and Threads, apart from the stage, each with its icon.
   expect(all('.dt-ticket').every(row => row.querySelector('.dt-ticket-stage button, .dt-ticket-stage a') === null
     && [...row.querySelectorAll('.dt-ticket-actions button, .dt-ticket-actions a')].every(action => action.querySelector('svg')))).toBe(true)
   expect(text()).toContain('来源会在每次轮询时自动重试')
   expect(text()).toContain('需要确认按钮颜色')
+  // The last day's counts and the Executor's slots are in the advanced half, with the chips of the Threads they name.
   expect(all('.dt-stat').map(stat => stat.textContent)).toEqual(['到达12', '被过滤2', '已评估5', '接单或续做1', '执行中2 / 3', '排队0', '等待新触发1'])
   expect(all('.dt-chip').map(chip => chip.textContent)[0]).toBe('GitHub#42CI 失败1')
   expect(document.querySelector('.dt-chip-problem')?.textContent).toBe('CI 失败1')
@@ -28,6 +38,7 @@ it('leads the overview with the pending Tickets, then problems, the last day and
 
 it('re-evaluates or dismisses an unjudged Eval from the problem list', async () => {
   await mount()
+  await openAdvanced()
   await click(zh.requeue)
   expect(server.requests.some(request => request.path === 'triggers/e3/requeue' && request.method === 'POST')).toBe(true)
   await click(zh.dismiss)
@@ -37,6 +48,7 @@ it('re-evaluates or dismisses an unjudged Eval from the problem list', async () 
 
 it('opens the Thread of an unjudged Eval at its Trigger from the problem list', async () => {
   await mount()
+  await openAdvanced()
   await click('评估未完成：这个文案好奇怪')
   expect(server.requests.some(request => request.path.startsWith('threads/feishu:oc_1:om_root'))).toBe(true)
   expect(document.querySelector('.dt-highlight')?.textContent).toContain('message e3')
@@ -44,6 +56,7 @@ it('opens the Thread of an unjudged Eval at its Trigger from the problem list', 
 
 it('follows the last day\'s counts to the status of each stage', async () => {
   await mount()
+  await openAdvanced()
   // Arrived Triggers include filtered ones, which have no Thread, so no list has that count to link to.
   expect(all('.dt-stat button').map(button => button.textContent)).toEqual(['2', '1'])
   await click(all('.dt-stat button')[0]!)
@@ -64,7 +77,9 @@ it('offers each Ticket that needs a person its actions on the overview: answer i
   expect(server.requests.some(request => request.path === 'tickets/t4/retry' && request.method === 'POST')).toBe(true)
   await click(all('.dt-ticket-actions button').find(button => button.textContent === '打开 Session')!)
   expect(server.opened).toEqual(['worker-t4'])
-  await click(all('.dt-ticket-actions button').filter(button => button.textContent === '停止').at(-1)!)
+  // The retry refreshed the boards, so the failed Ticket's stop button is looked up again, in its own row.
+  const failed = () => all('.dt-ticket').find(row => row.textContent?.includes('截图工具'))!
+  await click([...failed().querySelectorAll<HTMLElement>('.dt-ticket-actions button')].find(button => button.textContent === '停止')!)
   await click(zh.confirm)
   expect(server.requests.some(request => request.path === 'tickets/t4/stop' && request.method === 'POST')).toBe(true)
   expect(text()).not.toContain('截图工具')
@@ -73,12 +88,15 @@ it('offers each Ticket that needs a person its actions on the overview: answer i
 it('shows paused processing as a system problem with its resume action, and says so on the Policy records', async () => {
   server.settings = { ...server.settings, paused: true }
   await mount()
+  await openAdvanced()
   expect(text()).toContain(zh.problemPaused)
   await click(zh['tab.eval'])
   expect(text()).toContain(zh.evalRecordsPaused)
   await click(zh.resumeWhere)
   expect(tab(zh['tab.execution']).getAttribute('aria-selected')).toBe('true')
   await click(zh['tab.overview'])
+  // Back on the overview the engine half is folded again: the problem and its action are inside it.
+  await openAdvanced()
   await click(find(zh.resumeProcessing, '.dt-att button'))
   await click(zh.confirm)
   expect(server.requests.find(request => request.path === 'executor/pause')).toMatchObject({ method: 'POST', body: { paused: false } })
@@ -88,6 +106,7 @@ it('offers the step that fixes a settings problem as a button on the overview', 
   server.settings = { ...server.settings, policy: { ...server.settings.policy, sources: { feishu: { allowed: [], admission: {} },
     github: { allowed: [], admission: {} } } } }
   await mount()
+  await openAdvanced()
   expect(text()).toContain(zh.problemNoAllowed)
   await click(zh.actionAddAllowed)
   expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
@@ -96,10 +115,12 @@ it('offers the step that fixes a settings problem as a button on the overview', 
 
 it('counts the messages not sent in the last day, linking to the Source status, and shows nothing when there are none', async () => {
   await mount()
+  await openAdvanced()
   expect(all('.dt-stat-label').map(label => label.textContent)).not.toContain(zh.flowDroppedLabel)
   server.dropped = [droppedReply('m2', 1, 'feishu', 'channelGone'), droppedReply('m1', 2, 'github', 'channelIgnored'), droppedReply('m0',
     30, 'feishu', 'channelGone')]
   await remount()
+  await openAdvanced()
   const stat = all('.dt-stat').find(item => item.querySelector('.dt-stat-label')?.textContent === zh.flowDroppedLabel)!
   expect(stat.textContent).toBe(`${zh.flowDroppedLabel}2`)
   await click(stat.querySelector('button')!)
@@ -109,6 +130,7 @@ it('counts the messages not sent in the last day, linking to the Source status, 
 it('names a failing part of dsh-superagent itself by its label', async () => {
   server.health = { launch: { state: 'error', detail: 'spawn failed' }, relay: { state: 'ready', detail: 'Nothing waiting' } }
   await mount()
+  await openAdvanced()
   expect(all('.dt-cards .dt-att-what').map(item => item.textContent)).toContain(zh.problemRuntime.replace('{name}', zh['health.launch']))
   expect(text()).toContain('spawn failed')
 })
@@ -125,9 +147,12 @@ it('words a refused retry in the interface language by its code', async () => {
 
 it('shows the overview in English', async () => {
   await mount(en)
-  expect(all('.dt-section-title').map(title => title.textContent)).toEqual([`${en.pendingTickets}2`, `${en.problems}2`,
-    `${en.lastDay}${en.details}`, `${en['term.executor']}${en.details}`])
-  expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual([en['stage.answer'], en['stage.failed']])
+  expect(all('.dt-section-title').map(title => title.textContent)).toEqual([`${en.needsYou}2`, `${en.inProgress}1`, `${en.recentlyDone}1`])
+  expect(all('.dt-board-count').map(item => item.textContent)).toEqual([`${en.needsYou} 2`, `${en.inProgress} 1`, `${en.recentlyDone} 1`])
+  expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual([en['stage.answer'], en['stage.failed'], en['stage.working'],
+    en['outcome.stopped']])
+  await openAdvanced()
+  expect(all('.dt-section-title').map(title => title.textContent)).toContain(`${en.problems}2`)
   expect(all('.dt-stat-label').map(label => label.textContent)).toEqual([en.flowReceivedLabel, en.flowFilteredLabel, en.flowJudgedLabel,
     en.flowAcceptedLabel, en.executingLabel, en.queuedLabel, en.idleLabel])
 })
@@ -135,6 +160,7 @@ it('shows the overview in English', async () => {
 it('lists the unavailable Evals one by one, without the health entry that counts them as a failure of dsh-superagent', async () => {
   server.health.evals = { state: 'error', detail: '1 Eval(s) unavailable in the last hour without a later judgement' }
   await mount()
+  await openAdvanced()
   expect(all('.dt-cards .dt-att-what').map(item => item.textContent)).toEqual(['飞书 来源异常', '评估未完成：这个文案好奇怪'])
   expect(text()).not.toContain(zh['health.evals'])
 })
@@ -147,6 +173,7 @@ it('says when no Source is on, an Eval is past its deadline or a message keeps f
     text: '已修复', attempts: 4,
     error: 'HTTP 502 from GitHub' }]
   await mount()
+  await openAdvanced()
   const titles = () => all('.dt-cards .dt-att-what').map(item => item.textContent)
   // The Feishu Source is off, so its error is no problem any more.
   expect(titles()).toEqual([zh.problemNoSource, '评估超时未决定：#9 迟迟未决', '评估未完成：这个文案好奇怪', 'GitHub 回复发送失败（已重试 4 次）'])
@@ -154,6 +181,7 @@ it('says when no Source is on, an Eval is past its deadline or a message keeps f
   await click(zh.actionOpenSources)
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.source'])
   await click(tab(zh['tab.overview']))
+  await openAdvanced()
   await click('评估超时未决定：#9 迟迟未决')
   expect(server.requests.some(request => request.path.startsWith('threads/github:9'))).toBe(true)
 })

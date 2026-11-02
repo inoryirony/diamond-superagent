@@ -195,7 +195,11 @@ const overviewView = (): ApiResponse<'GET overview'> => {
         .map(([name, item]) => ({ kind: 'runtime-error' as const, name, detail: item.detail })),
       ...Object.values(server.settings.policy.sources).some(part => part.allowed.length) ? [] : [{ kind: 'no-allowed' as const }],
       ...server.failing.map(outgoing => ({ kind: 'outgoing' as const, outgoing }))],
-    person: server.person, executor: { running: 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers, idle: 1 },
+    person: server.person, needsYou: server.person.filter(ticket => !('action' in ticket && ticket.action === 'review')).length,
+    // What the Executor works on, and what the last day finished with, as the overview's columns show them.
+    working: server.tickets.open.filter(ticket => ticket.state === 'open' && ['working', 'review'].includes(String((ticket as { stage?: string }).stage ?? ''))),
+    ended: server.tickets.ended,
+    executor: { running: 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers, idle: 1 },
     flow: { received: 12, filtered: 2, triggers: 10, judged: 5, accepted: 1, evaluating: 0,
       dropped: server.dropped.filter(item => item.dropped.at >= dayAgo()).length },
     policyVersion: 'abcdef1234567890',
