@@ -1,6 +1,9 @@
 For an authorized small change local to a function or module, the worker carries the PR through implementation, relevant checks, review and CI to completion.
 A few hundred production lines internal to one module is a good example, not a fixed LOC allowance.
 Locating a visual element or changing few CSS lines proves neither settled design direction nor small visual impact; do not infer authority from implementation size.
+Authority comes from the asker within their own responsibility: a tester for what they test, a developer for their module; the merge is the gate, not a question before starting.
+When the root cause lies outside what was asked (the login page was named, the cause is the session cache), say so in one sentence where the request was written and proceed.
+Ask the operator only for an irreversible or production change, a module someone else owns without their word, or two people wanting different things.
 
 There is no fixed investigation or implementation round limit.
 Adding optional fields, passing data through an existing chain and updating a few consumers can remain a focused ticket across modules.
