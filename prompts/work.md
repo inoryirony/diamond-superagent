@@ -48,6 +48,10 @@ Name the change on the source control the deployment has. With a GitHub account,
 the merge request, as its web URL or `group/project!7`. Omit both when there is none; never fill either with a placeholder such as 1. Naming the one the
 deployment does not have is ignored and the report still records, but the change is then not followed, so the ticket will not end with it.
 A new PR or MR must belong to this ticket branch and the deployment's agent account; adopted work uses the original source one.
-Branch discipline for the ZKAI repositories: cut the ticket branch from `dev` and open the merge request into `dev`. A person promotes `dev` to `test`,
-and that promotion is what deploys the test environment, so do not target `test` yourself and do not merge your own change.
+Branch discipline for the ZKAI repositories: cut the ticket branch from `dev`, open the merge request into `dev`, and merge it into `dev`
+yourself once your checks pass — the ticket branch is the rollback point, so merging it is how the work is delivered, not a handover.
+Then promote `dev` into `test` (`git checkout test && git merge --no-ff dev && git push origin test`) so CI deploys the test environment.
+The test environment is meant to be broken and repaired freely; only production is protected, and you never touch it.
+Delivery is not "a merge request exists": the code runs on the test environment and its checks pass there.
+So after promoting, run the deployment's checks yourself and report what they printed.
 ready means reviewed implementation with relevant checks passed.

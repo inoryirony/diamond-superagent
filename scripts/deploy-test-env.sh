@@ -42,14 +42,26 @@ if [ "$target" != test ] && [ "$target" != dev ]; then
   exit 1
 fi
 
-# The branch discipline here is dev first, then test: a merge request into dev
-# is normal, and the promotion dev -> test is what runs the deploy stage. So a
-# dev-targeted merge request counts only once its commit is on test.
+# Delivery means the code is on the test environment and checked there, so this
+# script reports which of the three states the ticket's commit is in:
+#   1. still only on its own branch  -> merge it into dev, then promote dev to test
+#   2. on dev but not on test        -> promote dev to test (`git checkout test &&
+#                                       git merge --no-ff dev && git push origin test`)
+#   3. on test                       -> CI's deploy stage ran; check the image and the environment below
+# States 1 and 2 exit non-zero on purpose: the work is not delivered yet, and the
+# worker is the one that carries it the rest of the way. The ticket branch stays
+# the rollback point, and the test environment may break; only production is off limits.
 if [ "$target" = dev ]; then
-  merged=$(glab api "projects/$PROJECT/repository/commits/$sha/refs?type=branch" |
+  on_dev=$(glab api "projects/$PROJECT/repository/commits/$sha/refs?type=branch" |
+    jq -r '[.[] | select(.name == "dev")] | length')
+  on_test=$(glab api "projects/$PROJECT/repository/commits/$sha/refs?type=branch" |
     jq -r '[.[] | select(.name == "test")] | length')
-  if [ "$merged" = 0 ]; then
-    echo "merge request !$MR targets dev and its commit is not on test yet; merge dev into test to deploy it"
+  if [ "$on_dev" = 0 ]; then
+    echo "merge request !$MR is still open against dev: merge it into dev first, then promote dev to test"
+    exit 1
+  fi
+  if [ "$on_test" = 0 ]; then
+    echo "merge request !$MR is merged into dev; promote dev to test to deploy it (git checkout test && git merge --no-ff dev && git push origin test)"
     exit 1
   fi
   echo "merge request !$MR reached dev and dev's promotion carried $sha to test"

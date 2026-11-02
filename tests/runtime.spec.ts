@@ -1094,7 +1094,9 @@ it('leaves auto-merge to the delivery requirements, with the agent\'s own gh and
   const delivery = runtime.prompts.current().config.delivery
   expect(delivery).toContain('it changes fewer than 200 lines (additions plus deletions);')
   // Auto-merge is never enabled as the agent account; only a merge CLI the section names enables it.
-  expect(delivery).toContain('Never enable auto-merge as the agent account')
+  expect(delivery).toContain('never enable auto-merge as the agent account')
+  // A GitLab project delivers through dev and the dev-to-test promotion instead of the pull-request flow.
+  expect(delivery).toContain('you merge the merge request into `dev` once its checks pass')
   expect(delivery).toContain('<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha>')
   expect(runtime.prompts.preview(runtime.prompts.current().config).worker).not.toContain('gh-merge')
 })

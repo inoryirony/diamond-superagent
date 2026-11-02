@@ -115,9 +115,15 @@ A worker's result reaches its person through the stages `executor.reviews` and `
    when a result arrives, and the Reviewer is wired whether or not the phase was on at startup.
 
    A working pair of commands for the ZKAI repositories is in `scripts/deploy-test-env.sh` and `scripts/e2e-test-env.sh`. The
-   first proves the Ticket's merge request reached the branch whose pipeline deploys the test environment and that its image
-   was built; the second asks the running service what it serves, so a merged commit whose pod still runs the previous image
-   fails the review instead of passing it.
+   first reports which of three states the Ticket's commit is in — still only on its branch, on `dev` but not yet promoted, or
+   on `test` — and checks the built image and the live service once it is promoted. The second asks the running service what it
+   serves, so a merged commit whose pod still runs the previous image fails the review instead of passing it.
+
+   Delivery is the code running on the test environment with its checks passing there, not the existence of a merge request.
+   So the worker carries its own change the whole way: it merges its merge request into `dev` once its checks pass, promotes
+   `dev` into `test` (`git checkout test && git merge --no-ff dev && git push origin test`) to make CI deploy, and then runs the
+   checks itself. Its ticket branch is the rollback point, so the test environment may break and be repaired; production is the
+   only thing the agent never touches.
 
 ### When the rounds are spent
 

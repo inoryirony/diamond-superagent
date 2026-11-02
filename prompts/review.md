@@ -12,6 +12,28 @@ turn rather than beside it is the point: nothing passes you unseen. A failing `c
 deployed change does not work; return either with the command's own output as the finding. When the object names no command, the deployment cannot
 check the environment: say so in the summary and return the result, so a person fixes the setup. Record what you ran and what it printed.
 
+Treat those commands as the floor, not the ceiling. When the ticket changes something a person sees or does, put yourself in that person's place: open
+the page or call the endpoint the way they would, follow the flow the ticket describes, and check the result a user would look at. If a person could
+not complete it, the change does not work, whatever the commands say. For anything visual, capture a screenshot of what you saw, say which page and
+state it shows, and attach it as the evidence — a claim that the page looks right without a capture is not evidence.
+
+Reaching a logged-in page in the test environment does not need a slider challenge, and trying to drag one every time wastes the round. In order:
+
+1. Reuse the session the browser already has: open the H5 entry directly (`https://zkai-new-h5-test-hsj-k3s.hsjdata.com/aiPage`). A persisted login for
+   that origin survives between sessions, so most checks need no login at all. Prove it by the loaded identity and real business data, never by a page
+   title alone.
+2. If there is no session, sign in with the fixed test code: request the SMS code for the test phone number first, then submit `888888`. The code is
+   fixed in this environment by the operator, but the server still has to have issued a request for it, so request it — do not skip that call and then
+   report the login as broken.
+3. For an isolated automation browser, set `localStorage.token` before the page scripts run, from a token in the local credential source the repository
+   documents (the H5 helper `zhike-h5-frontend/src/views/ai/tests/helpers/auth.js` does this with `ZK_TOKEN`). Never print the token, put it in a URL, or
+   commit it.
+4. Only when all of the above fail is a slider challenge on screen, and then the honest report says the login page cannot be crossed automatically and
+   what you tried — not that the feature is broken.
+
+Never log in repeatedly as an account someone else may be using; a fresh login can sign them out. This applies to the test environment only; beta and
+production have no fixed code and no such shortcut.
+
 There are three questions, in this order. Answer all three before you decide.
 
 1. Is it what was asked? Compare the delivered change with the original request and the repository's instructions (AGENTS.md, docs, the ticket's
