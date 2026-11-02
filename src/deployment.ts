@@ -49,11 +49,20 @@ export const GithubAccountsSchema = z.object({
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** The operator's DingTalk account: the `dws` CLI and the operator's own open DingTalk ID, which no API returns and so is entered by hand. */
 export const DingtalkAccountSchema = z.object({ cli: z.string().trim().default(''), openDingtalkId: z.string().trim().default('') })
+/** The Jira Server account: its base URL and the name of the environment variable that holds a Personal Access Token; the token itself is never stored. */
+export const JiraAccountSchema = z.object({ baseUrl: z.string().trim().regex(/^(https?:[/][/][^ ]+)?$/, 'http(s) URL').default(''), patEnv: z.string().trim().regex(/^([A-Za-z_][A-Za-z0-9_]*)?$/, 'environment variable name').default('') })
+/** The operator's GitLab account: the `glab` CLI and the group whose merge requests the Source follows. */
+export const GitlabAccountSchema = z.object({ cli: z.string().trim().default(''), group: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape), dingtalk: Object.keys(DingtalkAccountSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape), dingtalk: Object.keys(DingtalkAccountSchema.shape),
+  jira: Object.keys(JiraAccountSchema.shape), gitlab: Object.keys(GitlabAccountSchema.shape) }
 
 export interface GithubAccount { cli: string; login: string; noreply: string; repository: string }
-export interface Deployment extends Machine { github?: GithubAccount; feishu?: FeishuBot; dingtalk?: DingtalkAccount }
+export interface Deployment extends Machine { github?: GithubAccount; feishu?: FeishuBot; dingtalk?: DingtalkAccount; jira?: JiraAccount; gitlab?: GitlabAccount }
+/** The Jira account a Personal Access Token (read from the environment variable `patEnv`, never stored) acts as. */
+export interface JiraAccount { baseUrl: string; patEnv: string; name: string; displayName: string }
+/** The signed-in GitLab account `glab` acts as, and the group whose merge requests the GitLab Source follows. */
+export interface GitlabAccount { cli: string; group: string; username: string }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
 /** The signed-in DingTalk account `dws` acts as; `openDingtalkId` is the operator-entered ID that tells the account's own messages apart. */
 export interface DingtalkAccount { cli: string; openDingtalkId: string; userId: string; name: string; corpId: string }
@@ -152,4 +161,45 @@ export async function resolveDingtalk(machine: Machine, dingtalk: unknown, probe
   const me = parsed(DingtalkSelf, json(await run('contact', 'user', 'me', '--format', 'json')))?.result[0]?.orgEmployeeModel
   if (!me) throw new SetupError('dingtalkSignedOut')
   return { cli, openDingtalkId: account.openDingtalkId, userId: me.userId, name: me.orgUserName, corpId: me.corpId }
+}
+
+const JiraSelf = z.looseObject({ name: z.string().min(1), displayName: z.string().default('') })
+/** Reads a Jira URL with a Bearer token and returns its body; a status outside 2xx throws. */
+export type JiraProbe = (url: string, token: string) => Promise<string>
+export const jiraProbe: JiraProbe = async (url, token) => {
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) })
+  if (!response.ok) throw new Error(`Jira answered HTTP ${response.status}`)
+  return response.text()
+}
+/**
+ * Verify the Jira Personal Access Token named by `patEnv` against `/rest/api/2/myself` and read the account it acts as; with both fields empty
+ * the Source is not configured, which is not a problem. The token is read from `env` only here and is never stored.
+ */
+export async function resolveJira(_machine: Machine, jira: unknown, probe: JiraProbe = jiraProbe, env: Record<string, string | undefined> = process.env): Promise<JiraAccount | undefined> {
+  const account = JiraAccountSchema.parse(jira ?? {})
+  if (!account.baseUrl && !account.patEnv) return undefined
+  if (!account.baseUrl) throw new SetupError('jiraBaseUrlUnset')
+  if (!account.patEnv) throw new SetupError('jiraPatUnset')
+  const token = env[account.patEnv]
+  if (!token) throw new SetupError('jiraPatMissing', { name: account.patEnv })
+  const baseUrl = account.baseUrl.replace(/[/]+$/, '')
+  const text = await probe(`${baseUrl}/rest/api/2/myself`, token).catch((error: unknown) => { throw new SetupError('jiraSignedOut', { output: reason(error) }) })
+  const me = parsed(JiraSelf, text)
+  if (!me) throw new SetupError('jiraSignedOut')
+  return { baseUrl, patEnv: account.patEnv, name: me.name, displayName: me.displayName }
+}
+
+const GitlabUser = z.looseObject({ username: z.string().min(1) })
+/** Verify the operator's `glab` is signed in and read the account it acts as; with both fields empty the Source is not configured, which is not a problem. */
+export async function resolveGitlab(machine: Machine, gitlab: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GitlabAccount | undefined> {
+  const account = GitlabAccountSchema.parse(gitlab ?? {})
+  if (!account.cli && !account.group) return undefined
+  if (!account.cli) throw new SetupError('gitlabCliUnset')
+  if (!account.group) throw new SetupError('gitlabGroupUnset')
+  let cli: string
+  try { cli = executable(account.cli, path, workerBin(machine.stateDir)) } catch (error) { throw new SetupError('gitlabCliMissing', { output: reason(error) }) }
+  const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('gitlabSignedOut', { output: reason(error) }) })
+  const me = parsed(GitlabUser, text)
+  if (!me) throw new SetupError('gitlabSignedOut')
+  return { cli, group: account.group.replace(/^[/]+|[/]+$/g, ''), username: me.username }
 }

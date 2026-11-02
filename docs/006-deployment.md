@@ -68,6 +68,32 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
 
+### Jira account (optional)
+
+1. Create a Personal Access Token for the agent's Jira account at `https://<jira>/secure/ViewProfile.jspa` → Personal Access Tokens (Jira Server 9.12 reads it from `Authorization: Bearer <token>`).
+2. Put the token in the environment of the dsh-superagent process under a name you choose, for example `JIRA_AGENT_PAT`, and set that name as the Source's token variable. The token itself is never written to settings or to the state directory, is not passed to worker Sessions, and does not appear in the API's answers.
+3. In **Sources**, set the Jira base URL (`https://issue.example.com`, no path) and the variable name. A save checks `GET /rest/api/2/myself` with the token; a failure disables only the Jira Source, and the setup problem names what to fix.
+
+Workers cannot read Jira: the token stays in the host process. They read the issue and its comments through `orchestrator_read`, and answer through `orchestrator_reply` or `orchestrator_report`, which the host posts back as a comment on the issue.
+
+### GitLab account (optional)
+
+1. Sign `glab` (1.122 or later) in to the agent's GitLab account, in its own configuration directory, and write a wrapper:
+
+   ```sh
+   GLAB_CONFIG_DIR="$HOME/.config/glab-agent" glab auth login --hostname git.youshu.com.cn
+   cat > ~/.local/bin/glab-agent <<'EOF'
+   #!/bin/sh
+   export GLAB_CONFIG_DIR="$HOME/.config/glab-agent"
+   exec glab "$@"
+   EOF
+   chmod +x ~/.local/bin/glab-agent
+   ```
+
+2. In **Sources**, set that wrapper as the CLI and the group whose projects the agent works in, such as `xk/product/zk-ai`. A save checks `glab api user` and reads the account name from it; a failure disables only the GitLab Source.
+
+GitLab has no Policy and no Channel: it only follows merge requests the agent opened. An MR whose source branch ends in the Ticket's name (as `agent/<name>` does) binds to that Ticket, and the Ticket ends when the MR merges or closes. Workers open the MR themselves; `skills/dsh-superagent-gitlab/SKILL.md` says how.
+
 ## Install
 
 Run this block once, on a machine that has no `superagent` profile yet:
@@ -145,6 +171,8 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
 1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+
+   For Jira, set the base URL, the token variable, the projects to watch, and whether new Issues and comments that do not address the agent are received. For GitLab, set the agent's `glab` wrapper and the group; it follows merge requests only and needs no Policy.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
@@ -221,7 +249,7 @@ Setup verifies the GitHub repository and the agent's push access, writes the wor
 
 The process environment that setup writes:
 
-- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
+- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `glab` runs the GitLab CLI's account; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
 - **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
 
 A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.

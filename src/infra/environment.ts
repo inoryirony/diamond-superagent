@@ -15,7 +15,7 @@ const MARKER = '# Written by dsh-superagent on every start; edits are lost.'
 /** Markers of files written under the project's earlier names (`dsh-tag`, `dsh-go`, `dsh-freelancer`), which `dsh-superagent` owns and replaces too. */
 const LEGACY_MARKERS = ['dsh-tag', 'dsh-go', 'dsh-freelancer'].map(name => `# Written by ${name} on every start; edits are lost.`)
 /** Commands workers need, which `blockedCommands` cannot block: the shims and git. */
-export const WORKER_COMMANDS: readonly string[] = ['gh', 'git', 'lark-cli', 'dws']
+export const WORKER_COMMANDS: readonly string[] = ['gh', 'git', 'glab', 'lark-cli', 'dws']
 export const workerBin = (stateDir: string): string => join(stateDir, 'worker-bin')
 export const workerGitConfig = (stateDir: string): string => join(stateDir, 'worker-gitconfig')
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
@@ -76,8 +76,8 @@ async function own(file: string, text: string, mode = 0o644): Promise<void> {
  * Atomically writes worker CLI shims and the isolated git configuration file into the state directory, refusing to overwrite foreign files.
  * Each shim strips the shim directory from PATH before exec so wrapper scripts resolving `gh` or `lark-cli` by name reach the real binary.
  */
-export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'github' | 'feishu' | 'dingtalk'>, blockedCommands: readonly string[]): Promise<void> {
-  const { stateDir, github, feishu, dingtalk } = deployment
+export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'github' | 'feishu' | 'dingtalk' | 'gitlab'>, blockedCommands: readonly string[]): Promise<void> {
+  const { stateDir, github, feishu, dingtalk, gitlab } = deployment
   const dir = workerBin(stateDir)
   await mkdir(dir, { recursive: true })
   const before = await readdir(dir)
@@ -102,6 +102,7 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   // A worker may read DingTalk through `dws`, but never sends: replies leave through the DingTalk Source's channel.
   const dws = (program: string): string => `${withoutShims}\ncase "$*" in 'chat message send'*) echo 'dws chat message send is blocked: the DingTalk Source sends replies.' >&2; exit 1;; esac\nexec ${shellQuote(program)} "$@"`
   await shim('dws', dingtalk ? dws(dingtalk.cli) : fail('dws is unavailable: this installation has no DingTalk account.'))
+  await shim('glab', gitlab ? run(gitlab.cli) : fail('glab is unavailable: this installation has no GitLab account.'))
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
     await shim(name, fail(`${name} is blocked in this installation${github ? `; use gh, which acts as ${github.login}` : ''}.`))
   }

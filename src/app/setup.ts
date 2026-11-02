@@ -1,7 +1,7 @@
 /** Probes the optional GitHub account and Feishu bot CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDingtalk, resolveFeishuBot, resolveGithub, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { SETUP_FIELDS, resolveDingtalk, resolveFeishuBot, resolveGitlab, resolveGithub, resolveJira, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { blockingProblem, SetupError, type SetupProblem } from '../setup.ts'
@@ -62,7 +62,9 @@ export class Setup {
     const { machine } = this.host
     const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
       : block === 'source:github' ? resolveGithub(machine, settings.sources.github?.config, this.probe())
-      : block === 'source:dingtalk' ? resolveDingtalk(machine, settings.sources.dingtalk?.config, this.probe()) : undefined
+      : block === 'source:dingtalk' ? resolveDingtalk(machine, settings.sources.dingtalk?.config, this.probe())
+      : block === 'source:jira' ? resolveJira(machine, settings.sources.jira?.config)
+      : block === 'source:gitlab' ? resolveGitlab(machine, settings.sources.gitlab?.config, this.probe()) : undefined
     await check?.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
@@ -87,7 +89,10 @@ export class Setup {
     const github = await optional(resolveGithub(machine, settings.sources.github?.config, probe), 'GitHub')
     const feishu = await optional(resolveFeishuBot(machine, settings.sources.feishu?.config, probe), 'Feishu')
     const dingtalk = await optional(resolveDingtalk(machine, settings.sources.dingtalk?.config, probe), 'DingTalk')
-    const resolved: Deployment = { ...machine, ...(github ? { github } : {}), ...(feishu ? { feishu } : {}), ...(dingtalk ? { dingtalk } : {}) }
+    const jira = await optional(resolveJira(machine, settings.sources.jira?.config), 'Jira')
+    const gitlab = await optional(resolveGitlab(machine, settings.sources.gitlab?.config, probe), 'GitLab')
+    const resolved: Deployment = { ...machine, ...(github ? { github } : {}), ...(feishu ? { feishu } : {}), ...(dingtalk ? { dingtalk } : {}),
+      ...(jira ? { jira } : {}), ...(gitlab ? { gitlab } : {}) }
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
