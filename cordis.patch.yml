@@ -177,6 +177,10 @@
               edit: false
           - id: tool-fs-search
             name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              # Required by the package: without it the whole Reviewer Session fails to start, which made every review
+              # report "could not start" instead of judging the result.
+              sampleOverCapGlobResults: false
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
             config:

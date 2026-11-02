@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
-import { ROUTER_PRESET, WORKER_PRESET } from '../src/app/sessions.ts'
+import { REVIEWER_PRESET, ROUTER_PRESET, WORKER_PRESET } from '../src/app/sessions.ts'
 
 interface Row { id?: string; name: string; disabled?: unknown; config?: Record<string, unknown> & { plugins?: Row[] } | Row[] }
 /** The patch as DSH reads it: Cordis's include plugin parses `!!js` scalars, and applies the inserts to an entry list. */
@@ -70,4 +70,22 @@ it('defines the router preset the main Session runs under: the worker\'s 5-secon
     '@deepseek-ai/dsh-tool-todo', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present', '@deepseek-ai/dsh-plan-mode',
     '@deepseek-ai/dsh-plugin-manager/tools', '@deepseek-ai/dsh-plugin-market/tools', '@deepseek-ai/dsh-tool-schedule', '@deepseek-ai/dsh-tool-goal',
     '@deepseek-ai/dsh-command-goal', '@deepseek-ai/dsh-tool-workflow', '@deepseek-ai/dsh-workflow-ptc']) expect(names, name).not.toContain(name)
+})
+
+it('defines the reviewer preset, with the required settings its tools cannot start without', async () => {
+  const rows = await patched()
+  // A review Session is created with REVIEWER_PRESET, so a missing row or a package without its required config makes every
+  // review fail to start instead of judging the result.
+  const reviewer = presetOf(rows, REVIEWER_PRESET)
+  expect(reviewer.id).toBe(REVIEWER_PRESET)
+  const plugins = flat(reviewer.plugins)
+  const named = (name: string) => plugins.filter(row => row.name === name).map(row => row.config)
+  // Reads only: a change the Reviewer made would be a change nobody reviewed.
+  expect(named('@deepseek-ai/dsh-tool-fs')).toEqual([expect.objectContaining({ write: false, edit: false })])
+  // `sampleOverCapGlobResults` has no default in the package; leaving it out failed three reviews in a row.
+  expect(named('@deepseek-ai/dsh-tool-fs-search')).toEqual([expect.objectContaining({ sampleOverCapGlobResults: false })])
+  // It runs the deployment's checks itself, so it needs a shell and the job tools.
+  for (const name of ['@deepseek-ai/dsh-tool-bash', '@deepseek-ai/dsh-tool-jobs', '@deepseek-ai/dsh-agent-instructions', '@deepseek-ai/dsh-tool-skill']) {
+    expect(named(name).length, name).toBeGreaterThan(0)
+  }
 })
