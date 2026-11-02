@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Ticket } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
-import { pollGitlab } from '../src/sources/gitlab.ts'
+import { gitlabKind, pollGitlab } from '../src/sources/gitlab.ts'
 import { mrEndNotices, observeMr, type Mr } from '../src/sources/gitlab-mr.ts'
 import { sourceHost, GITLAB } from './fixtures/source-host.ts'
 
@@ -47,5 +47,18 @@ describe('gitlab merge requests', () => {
     expect(h.store.tickets.get('t1')!.follows).toEqual([{ thread: 'gitlab:42!7', own: true }])
     expect(h.store.get(KV.gitlab.cursor)).toBeTruthy()
     h.store.close()
+  })
+})
+
+describe('gitlab environment', () => {
+  it('tells the worker the group it watches and the URL of an MR Thread, and nothing of a Trigger that is not an MR', () => {
+    const values = gitlabKind.environment!.values as (input: unknown) => Record<string, string>
+    const deployment = { gitlab: GITLAB } as never
+    expect(values({ deployment, trigger: undefined })).toEqual({ DSH_SUPERAGENT_GITLAB_MR: GITLAB.group, DSH_SUPERAGENT_GITLAB_URL: '' })
+    const url = mr().web_url!
+    expect(values({ deployment, trigger: { source: 'gitlab', meta: { url } } })).toMatchObject({ DSH_SUPERAGENT_GITLAB_URL: url })
+    // A Jira Trigger carries a URL too, and it is not the ticket's MR.
+    expect(values({ deployment, trigger: { source: 'jira', meta: { url: 'https://issue.hsjdata.com/browse/ZKAI-1' } } }))
+      .toMatchObject({ DSH_SUPERAGENT_GITLAB_URL: '' })
   })
 })

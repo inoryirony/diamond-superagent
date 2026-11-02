@@ -30,8 +30,10 @@ export const gitlabKind: SourceKind<GitlabConfig> = {
   environment: {
     variables: [
       { key: 'DSH_SUPERAGENT_GITLAB_MR', description: { zh: '这个来源监听的 GitLab group。智能体用 glab 从 dev 切出分支 agent/$DSH_SUPERAGENT_NAME，开目标为 test 的 MR（glab mr create --fill）时，MR 会关联到工单；没有配置 GitLab 时为空', en: 'The GitLab group this Source watches. An MR the agent opens with glab from a branch agent/$DSH_SUPERAGENT_NAME cut from dev, targeting test (glab mr create --fill), binds to the ticket; empty when GitLab is not configured' } },
+      { key: 'DSH_SUPERAGENT_GITLAB_URL', description: { zh: '这个工单的 MR 在 GitLab 上的地址，部署测试环境与端到端检查用它确认结果已经上线；工单没有 MR 时为空', en: 'The URL of this ticket\'s MR on GitLab, which the deploy and end-to-end checks use to confirm the result is live; empty when the ticket has no MR' } },
     ],
-    values: ({ deployment }) => ({ DSH_SUPERAGENT_GITLAB_MR: deployment.gitlab?.group ?? '' }),
+    values: ({ deployment, trigger }) => ({ DSH_SUPERAGENT_GITLAB_MR: deployment.gitlab?.group ?? '',
+      DSH_SUPERAGENT_GITLAB_URL: trigger?.source === SOURCE ? String(trigger.meta.url ?? '') : '' }),
   },
   facts: (deployment): Record<string, Localized | string> => deployment?.gitlab ? {
     cli: { zh: `当前账号 @${deployment.gitlab.username}`, en: `Current account @${deployment.gitlab.username}` },
