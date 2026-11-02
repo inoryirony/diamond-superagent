@@ -372,6 +372,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
 | `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, `sent` or `gone` |
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
+| `src/sources/dingtalk.ts` | The DingTalk kind and plugin entry, exported as `./dingtalk-watch`; the operator's own account, so no bot identity |
+| `src/sources/dingtalk-trigger.ts` | DingTalk messages as Triggers, by one rule for live events and history pages; episodes as threads, the noise gate, the operator's own messages |
+| `src/sources/dingtalk-loops.ts` | The DingTalk loops: the `dws event consume` consumer and the history reconciliation of known conversations |
+| `src/sources/dingtalk-channel.ts` | The DingTalk Channel: a direct or an addressed group message as the operator, always `sent` |
+| `src/sources/dingtalk-read.ts` | The `dingtalk/` reads of a Trigger's episode, root and parent, and `dingtalkThreadContext` |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
@@ -397,7 +402,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts`, `src/sources/feishu.ts` and `src/sources/dingtalk.ts` are also the entries of the three Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./dingtalk-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
 
 ## Tests
 
