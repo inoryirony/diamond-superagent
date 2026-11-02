@@ -55,13 +55,15 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
       onChange={event => draft.edit({ ...draft.value, [key]: event.target.value })} />
   </Field>
   const blocking = blockingProblem(setup.problems)
-  const unset = (place: 'github' | 'feishu' | 'dingtalk', fallback: string): string => {
+  const unset = (place: 'github' | 'feishu' | 'dingtalk' | 'jira' | 'gitlab', fallback: string): string => {
     const problem = problemOf(place, setup.problems)
     return problem ? setupText(t, problem) : fallback
   }
   const feishu = accounts?.feishu ? accounts.feishu.name || accounts.feishu.botId : unset('feishu', t('deploymentFeishuNone'))
   const dingtalk = accounts?.dingtalk ? accounts.dingtalk.name || accounts.dingtalk.userId : unset('dingtalk', t('deploymentFeishuNone'))
   const github = accounts?.github ?? undefined
+  const jira = accounts?.jira ? accounts.jira.displayName || accounts.jira.name : unset('jira', t('deploymentJiraNone'))
+  const gitlab = accounts?.gitlab ? `@${accounts.gitlab.username} (${accounts.gitlab.group})` : unset('gitlab', t('deploymentGitlabNone'))
   return <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
     <Fields disabled={draft.busy}>
       <Hint>{t('deploymentIntro')}</Hint>
@@ -70,7 +72,8 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
       </div>}
       {showAccounts && <Section title={t('deploymentDerived')} hint={t('deploymentDerivedHint')}>
         <KeyValues rows={[[t('deploymentRepository'), github?.repository ?? unset('github', '—')],
-          [t('deploymentAgent'), github ? `@${github.agent}` : '—'], [t('deploymentFeishu'), feishu], [t('deploymentDingtalk'), dingtalk]]} />
+          [t('deploymentAgent'), github ? `@${github.agent}` : '—'], [t('deploymentFeishu'), feishu], [t('deploymentDingtalk'), dingtalk],
+          [t('deploymentJira'), jira], [t('deploymentGitlab'), gitlab]]} />
         <Hint>{t('deploymentAccountsWhere')}</Hint>
       </Section>}
       <Section title={t('deploymentMachine')}>

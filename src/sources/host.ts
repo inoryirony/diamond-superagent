@@ -15,6 +15,8 @@ export const HEALTH_TEXT = {
   dingtalkCliUnset: 'The Source is on, and its dws CLI or your open DingTalk ID is not set',
   githubUnset: 'The Source is on, and its repository or agent CLI is not set',
   feishuBotMissing: 'Waiting for the Feishu bot',
+  jiraUnset: 'The Source is on, and its base URL or Personal Access Token variable is not set',
+  gitlabUnset: 'The Source is on, and its glab CLI or group is not set',
   pollFailures: '{count} consecutive failed polls; last: {error}',
 } as const
 export type HealthCode = keyof typeof HEALTH_TEXT

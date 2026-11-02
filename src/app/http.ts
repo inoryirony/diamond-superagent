@@ -97,7 +97,9 @@ function setupView(runtime: HttpHost) {
   const resolved = runtime.configured() ? runtime.deployment : undefined
   return {
     machine: machineView(runtime.machine), problems: runtime.problems,
-    accounts: resolved ? { github: resolved.github ? { repository: resolved.github.repository, agent: resolved.github.login } : null, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null, dingtalk: resolved.dingtalk ? { userId: resolved.dingtalk.userId, name: resolved.dingtalk.name, corpId: resolved.dingtalk.corpId } : null } : null,
+    accounts: resolved ? { github: resolved.github ? { repository: resolved.github.repository, agent: resolved.github.login } : null, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null, dingtalk: resolved.dingtalk ? { userId: resolved.dingtalk.userId, name: resolved.dingtalk.name, corpId: resolved.dingtalk.corpId } : null,
+      jira: resolved.jira ? { name: resolved.jira.name, displayName: resolved.jira.displayName, baseUrl: resolved.jira.baseUrl, patEnv: resolved.jira.patEnv } : null,
+      gitlab: resolved.gitlab ? { username: resolved.gitlab.username, group: resolved.gitlab.group } : null } : null,
   }
 }
 /** Build the `/orchestrator/api/state` response consumed by the management panel and `scripts/dsh-superagent status` (`docs/006-deployment.md`). */

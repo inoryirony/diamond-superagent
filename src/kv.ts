@@ -64,4 +64,11 @@ export const KV = {
     history: family<string, [conversation: string]>('dingtalk-history:'),
     roots: family<Record<string, string>, [conversation: string]>('dingtalk-roots:'),
     episodes: family<{ rootId: string; lastAt: number }, [conversation: string]>('dingtalk-episodes:') },
+  /**
+   * Jira Source: the `updated` cursor of the issue search, and the Trigger IDs already ingested from each issue (bounded, oldest
+   * first) so a re-read of an unchanged issue or comment produces nothing.
+   */
+  jira: { cursor: record<string>('jira-cursor'), seen: family<string[], [issue: string]>('jira-seen:') },
+  /** GitLab Source: the `updated_after` cursor of the merge request search. */
+  gitlab: { cursor: record<string>('gitlab-cursor') },
 }

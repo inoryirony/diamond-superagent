@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
-import type { Deployment, GithubAccount } from '../deployment.ts'
+import type { Deployment, GithubAccount, JiraAccount } from '../deployment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -135,4 +135,53 @@ export class Commands {
   }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
+  /**
+   * Calls Jira's REST API v2 on `path` (`/rest/api/2/...`) with the Personal Access Token read from the environment variable the
+   * account names, and parses the JSON answer. The token is read here and never stored or passed on.
+   * A network failure is retried up to three times; an HTTP failure throws a CliError carrying the status as `code`.
+   */
+  async jira<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+    const account = this.deployment.jira
+    if (!account) throw new Error('The Jira Source has no working account')
+    const { baseUrl, patEnv } = account
+    const token = process.env[patEnv]
+    if (!token) throw new CliError(`The environment variable ${patEnv}, which holds the Jira Personal Access Token, is not set`)
+    const url = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const response = await fetch(url, {
+          method: init.method ?? 'GET',
+          headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...init.body === undefined ? {} : { 'Content-Type': 'application/json' } },
+          ...init.body === undefined ? {} : { body: JSON.stringify(init.body) },
+          signal: this.signal,
+        })
+        const text = await response.text()
+        if (!response.ok) throw new CliError(`Jira answered HTTP ${response.status}${text ? `: ${text.slice(0, 500)}` : ''}`, response.status)
+        return (text ? JSON.parse(text) : {}) as T
+      } catch (error) {
+        if (error instanceof CliError) throw error
+        if (attempt >= 3) throw new CliError(`Jira request failed: ${error instanceof Error ? error.message : String(error)}`)
+        await new Promise(resolve => setTimeout(resolve, attempt * 1000))
+      }
+    }
+  }
+  /**
+   * Runs the operator's `glab` and parses its JSON output.
+   * A network failure is retried up to three times; any other failure is thrown as a CliError.
+   */
+  async glab<T>(args: string[], cwd?: string): Promise<T> {
+    const account = this.deployment.gitlab
+    if (!account) throw new Error('The GitLab Source has no working account CLI')
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const output = await this.run(account.cli, args, cwd)
+        // `glab api` may print a warning line before its JSON.
+        const at = output.search(/[[{]/)
+        return JSON.parse(at < 0 ? output : output.slice(at)) as T
+      } catch (error) {
+        if (attempt >= 3 || !/NETWORK_ERROR|network/i.test(error instanceof Error ? error.message : '')) throw error
+        await new Promise(resolve => setTimeout(resolve, attempt * 1000))
+      }
+    }
+  }
 }

@@ -1,12 +1,20 @@
 /** Structured startup and configuration errors with the settings location where the operator can fix them. */
 import { fill } from './infra/text.ts'
 
-export type SetupPlace = 'deployment' | 'github' | 'feishu' | 'dingtalk'
+export type SetupPlace = 'deployment' | 'github' | 'feishu' | 'dingtalk' | 'jira' | 'gitlab'
 export const SETUP_PROBLEMS = {
   dingtalkCliUnset: ['dingtalk', 'The DingTalk Source names no dws CLI.'],
   dingtalkSelfUnset: ['dingtalk', 'The DingTalk Source names no open DingTalk ID of your own account.'],
   dingtalkCliMissing: ['dingtalk', 'The DingTalk dws CLI was not found.'],
   dingtalkSignedOut: ['dingtalk', 'The DingTalk dws CLI is not signed in; sign in with dws auth login.'],
+  jiraBaseUrlUnset: ['jira', 'The Jira Source names no base URL.'],
+  jiraPatUnset: ['jira', 'The Jira Source names no environment variable for the Personal Access Token.'],
+  jiraPatMissing: ['jira', 'The environment variable {name}, which should hold the Jira Personal Access Token, is not set.'],
+  jiraSignedOut: ['jira', 'Jira did not accept the Personal Access Token.'],
+  gitlabCliUnset: ['gitlab', 'The GitLab Source names no glab CLI.'],
+  gitlabGroupUnset: ['gitlab', 'The GitLab Source names no group.'],
+  gitlabCliMissing: ['gitlab', 'The GitLab glab CLI was not found.'],
+  gitlabSignedOut: ['gitlab', 'The GitLab glab CLI is not signed in; sign in with glab auth login.'],
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
   gitTooOld: ['deployment', 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
   environmentFailed: ['deployment', 'Preparing the agent environment failed.'],
