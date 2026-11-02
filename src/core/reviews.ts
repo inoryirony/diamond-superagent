@@ -24,7 +24,9 @@ export class Reviews extends EnginePart {
   }
   /** Whether this ticket's ready result asks for a review: reviews are on and its rounds last. */
   required(ticket: Ticket): boolean {
-    return (this.options.executor.reviews?.() ?? false) && reviewRequired(ticket, true, REVIEW_ROUNDS)
+    const on = this.options.executor.reviews?.() ?? false
+    const wanted = reviewRequired(ticket, true, REVIEW_ROUNDS)
+    return on && wanted
   }
   /** Record that `assignment`'s ready result goes to review round `round` and queue the review. */
   start(ticket: Ticket, assignment: Assignment): void {

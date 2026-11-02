@@ -10,7 +10,7 @@ import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
-import { mandateInstructions } from '../src/executor/dsh.ts'
+import { mandateInstructions, reviewerSessionId } from '../src/executor/dsh.ts'
 import { masterPrompt } from '../src/app/context.ts'
 import { reference, testMachine } from './fixtures/deployment.ts'
 import type { Machine } from '../src/deployment.ts'
@@ -378,9 +378,13 @@ it('shows a message that carries JSON, with or without a label, as its label and
   expect(readable('label: {not json}')).toBe('label: {not json}')
 })
 
-it('ends a ticket on ready when no PR is bound', async () => {
+it('ends a ticket on a ready result once its review passes it, when no PR is bound', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'done locally' })
+  // With reviews on, the result waits in a review of its own; the review's pass ends the ticket, as the report used to.
+  await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.reviews).toHaveLength(1))
+  const review = runtime.store.tickets.get(ticket.id)!.reviews![0]!
+  await runtime.reviewers.reviewed(reviewerSessionId(ticket.id, review.round), { outcome: 'passed', summary: 'Checked the diff.' })
   expect(runtime.store.tickets.get(ticket.id)).toMatchObject({ ended: expect.objectContaining({ outcome: 'completed' }) })
   await expect(runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'late' })).rejects.toThrow('Ticket ended')
 })
@@ -1451,8 +1455,12 @@ it('tells the conversation that the PR merged when work a restart recovered ends
   expect(runtime.store.tickets.get(ticket.id)).not.toHaveProperty('ended')
   const id = key('pr-terminal', '42', 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged')
   expect(runtime.store.replyStatus(id)).toBeUndefined()
-  // Its ready report ends the ticket with the PR, and the conversation hears of the merge once.
+  // Its ready report goes to a review of its own, and that review's pass ends the ticket with the PR, so the conversation
+  // hears of the merge once.
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Recovered and verified' })
+  await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.reviews).toHaveLength(1))
+  const round = runtime.store.tickets.get(ticket.id)!.reviews![0]!.round
+  await runtime.reviewers.reviewed(reviewerSessionId(ticket.id, round), { outcome: 'passed', summary: 'Checked the recovery.' })
   expect(runtime.store.tickets.get(ticket.id)!.ended).toMatchObject({ outcome: 'merged' })
   expect(runtime.store.replyStatus(id)).toBeDefined()
   // The report that ended the ticket was the worker's own: its turn is not cancelled inside that tool call.

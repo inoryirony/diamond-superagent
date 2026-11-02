@@ -7,6 +7,7 @@ import { KV } from '../src/kv.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, NOTE_WORDS } from '../src/infra/text.ts'
+import { reviewerSessionId } from '../src/executor/dsh.ts'
 import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host
@@ -438,7 +439,11 @@ it('relays a worker\'s report with its ticket card and the start of its summary,
     read: `ticket/${ticket.id}/result` })
   expect(String(report.summary)).toBe(summary.slice(0, 600))
   expect(report.ticket).not.toHaveProperty('preview')
-  // The end of the ticket, which the ready report brought, comes with its card.
+  // With reviews on, the ready result waits in a review of its own: passing it ends the ticket, and the end comes with its card.
+  await vi.waitFor(() => expect(h.runtime.store.tickets.get(ticket.id)!.reviews).toHaveLength(1))
+  const round = h.runtime.store.tickets.get(ticket.id)!.reviews![0]!.round
+  await h.runtime.reviewers.reviewed(reviewerSessionId(ticket.id, round), { outcome: 'passed', summary: 'Checked the diff.' })
+  await h.runtime.idle()
   expect(notices().at(-1)).toMatchObject({ ticket_ended: { ticket_id: ticket.id, state: 'completed' } })
 })
 

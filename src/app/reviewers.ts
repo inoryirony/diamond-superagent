@@ -78,7 +78,9 @@ export class Reviewers implements ReviewerPort, ReviewerSessions {
     // result to a person, which is how this phase knows the review is over.
     host.effects.handle('review-verdict', request => this.finishQueued(request), { limit: () => 16, retry: [1000, 30_000] })
   }
-  review(request: ReviewRequest): void { this.host.effects.enqueue('review', `${request.ticketId}:${request.round}`, request) }
+  review(request: ReviewRequest): void {
+    this.host.effects.enqueue('review', `${request.ticketId}:${request.round}`, request)
+  }
   /** Ends the review running on `ticket`, whose result is gone once the ticket ended or a person restarted its worker. */
   stopReview(ticket: Ticket, _reason: string): void {
     const review = pendingReview(ticket)
@@ -97,7 +99,11 @@ export class Reviewers implements ReviewerPort, ReviewerSessions {
     if (this.host.closing()) throw new Error('dsh-superagent is stopping')
     if (this.host.paused()) throw new Later('Processing is paused')
     if (!this.current(request.ticketId, request.round)) return
-    await this.run(request.ticketId, request.round)
+    // The review's turn goes on by itself: what holds it back, such as a deploy command or the model's answer, must not keep
+    // a stop from ending the turn, so the effect is complete once the verdict exists rather than once the turn ends.
+    void this.run(request.ticketId, request.round).catch((error: unknown) => {
+      if (!this.host.closing()) this.unfinished(request.ticketId, request.round, `the review failed: ${String(error)}`)
+    })
   }
   /** Opens (or reopens) the review's Session, tells it what to review, and waits for its turn to end. */
   async run(ticketId: string, round: number): Promise<void> {
@@ -112,16 +118,18 @@ export class Reviewers implements ReviewerPort, ReviewerSessions {
       const text = JSON.stringify({ ticket_id: ticketId, round, of_rounds: ROUNDS, title: ticket.title, directory,
         topic: `ticket/${ticketId}`, transcript: `ticket/${ticketId}/transcript`,
         ...round > 1 ? { note: 'This round judges whether the findings of the last review were fixed; the worker was sent them.' } : {} })
-      await this.host.sessions.prompt(sessionId, `review:${ticketId}:${round}`, text, 'queue')
-      // The deploy phase runs before the verdict, in the ticket's own directory, and a failure is the review's finding.
-      const deploy = this.host.deploy()
-      if (deploy) {
-        const failure = await this.ran(ticketId, deploy)
-        if (failure) { await this.apply(sessionId, failure); await agent.whenIdle(); return }
-      }
-      // Answer in place of the model where the host has an answer for this review, as a test does.
+      // Where the host stands in for the model's verdict, a test answers before the Session's turn can end without one.
       const answered = this.answer?.(ticketId, round)
-      if (answered) await this.apply(sessionId, answered)
+      if (answered) { await this.apply(sessionId, answered); this.running.delete(sessionId); return }
+      await this.host.sessions.prompt(sessionId, `review:${ticketId}:${round}`, text, 'queue')
+      // Everything that holds the verdict back goes on beside the review's own turn rather than before it: a review waiting on
+      // a deploy, a model call or a check still ends with its turn, so the host can stop.
+      const deploy = this.host.deploy()
+      if (deploy) void (async () => {
+        // The deploy phase runs before the verdict, in the ticket's own directory; a failure is the review's finding.
+        const failure = await this.ran(ticketId, deploy)
+        if (failure) return this.apply(sessionId, failure)
+      })().finally(() => { this.host.effects.enqueue('review-verdict', sessionId, { sessionId }) })
     } catch (error) {
       this.running.delete(reviewerSessionId(ticketId, round))
       if (this.host.closing() || error instanceof Later) throw error

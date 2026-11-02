@@ -634,6 +634,8 @@ describe('what a worker read', () => {
   async function completed() {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
     await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done' }); await h.runtime.idle()
+    // The ready result waits in a review of its own; passing it ends the ticket, whose message then resumes it.
+    await h.finishReview(one.ticket.id)
     idle(one.sessionId)
     await later()
     return { one, thanks: feishu('2', '@bot 谢谢', { root_id: 'om_1' }), ticket: () => h.runtime.store.tickets.get(one.ticket.id)! }
@@ -819,6 +821,8 @@ it('resumes an ended ticket a person wrote to during a pause once it lifts, unde
   const ended = async (id: string) => {
     const { ticket, sessionId } = await h.acceptedTicket(feishu(id, `@bot 修${id}`, { root_id: `om_${id}` }))
     await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
+    // The ready result waits in a review of its own; passing it is what ends the ticket.
+    await h.finishReview(ticket.id)
     return ticket.id
   }
   const first = await ended('1'), second = await ended('3')

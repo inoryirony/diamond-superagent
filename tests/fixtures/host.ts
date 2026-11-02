@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { vi, type Mock } from 'vitest'
+import { expect, vi, type Mock } from 'vitest'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { Runtime } from '../../src/app/runtime.ts'
 import { Store } from '../../src/app/store.ts'
@@ -260,8 +260,11 @@ export async function startRuntime(seed?: (store: Store) => void) {
   deliveries.mockClear()
   // Reviews answer every round with the configured verdict, as a Reviewer Session would: the verdict `reviews(answer)` names,
   // or `passed` when it names none. A test sets the answer before the result whose review it judges.
-  const reviews: { verdict: ReviewReport; sessions: string[] } = { verdict: { outcome: 'passed', summary: 'Checked the diff and ran the tests.' }, sessions: [] }
-  runtime.reviewers.answer = () => reviews.verdict
+  const reviews: { verdict: ReviewReport; answers: Map<string, ReviewReport>; sessions: string[] } = { sessions: [],
+    verdict: { outcome: 'passed', summary: 'Checked the diff and ran the tests.' }, answers: new Map() }
+  // The host stands in for the Reviewer Session's model only when a test answers: by default the Session's turn runs on, as
+  // a real Reviewer's would, until the test finishes the review with `finishReview` or steps the Session itself.
+  runtime.reviewers.answer = (ticketId, round) => reviews.answers.get(`${ticketId}:${round}`)
 
   /** Parsed JSON payloads delivered to `sessionId`. */
   const relays = (sessionId: string) => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId === sessionId)
@@ -275,6 +278,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
     .filter(call => call.sessionId.startsWith('eval-') && (JSON.parse(call.text) as { trigger_id?: string }).trigger_id === triggerId).at(-1)?.sessionId ?? runtime.masterId
   /** Answers every following review with `verdict`, as the Reviewer Session of that round would. */
   const review = (verdict: ReviewReport) => { reviews.verdict = verdict }
+
   /**
    * Finishes the review running on `ticketId` with the answer a Reviewer Session gives: the verdict `review` set, unless
    * `verdict` names another. It runs in the review's own Session, which a test steps through like any other.
@@ -283,6 +287,8 @@ export async function startRuntime(seed?: (store: Store) => void) {
     const ticket = runtime.store.tickets.get(ticketId)!
     const round = ticket.reviews!.at(-1)!.round
     const sessionId = reviewerSessionId(ticketId, round)
+    // The review's Session is up once the effect queue started it; a verdict before that would have no run to record it.
+    await vi.waitFor(() => expect(runtime.reviewers.agent(ticketId, round)).toBeDefined(), { timeout: 5000 })
     await runtime.reviewers.reviewed(sessionId, verdict ?? reviews.verdict)
   }
   const runTool = async (sessionId: string, name: string, args: unknown) => {

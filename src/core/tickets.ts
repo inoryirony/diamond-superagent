@@ -411,7 +411,9 @@ export class Tickets extends EnginePart {
     const ticket = this.repo.tickets.get(ticketId)
     if (!ticket || !liveTicket(ticket)) return
     const done = !ticket.follows?.length ? { outcome: 'completed' as const, at } : this.followsDone(ticket)
-    if (!done || this.unfinished(ticket, at)) return
+    // The reviewed result is the ticket's result, as a ready report would have been: what `unfinished` asks about the work
+    // after the close does not apply, and the report that asked for the review is not work left unfinished.
+    if (!done) return
     const resumed = Date.parse(latestAssignment(ticket)?.createdAt ?? '') > Date.parse(at)
     this.end(ticketId, 'executor', done.outcome, resumed ? this.now() : done.at)
   }

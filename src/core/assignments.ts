@@ -131,7 +131,9 @@ export class Assignments extends EnginePart {
     this.repo.tickets.save(ticket)
     // With reviews on, a ready result is judged before the ticket delivers or ends it: the review then passes it on as the
     // report would have, or returns it to the worker with findings.
-    if (report.state === 'ready' && this.reviews?.required(ticket)) { this.reviews.start(ticket, assignment); return this.require(ticketId) }
+    if (report.state === 'ready' && this.reviews?.required(ticket)) {
+      this.reviews.start(ticket, assignment); return this.require(ticketId)
+    }
     // A ticket that follows Threads ends with them: a ready report ends it only once followsDone holds, with that outcome.
     const ready = !ticket.follows?.length ? 'completed' : this.tickets.followsDone(ticket)?.outcome
     // A dropped report after a close the ticket deferred ends it as the close did, which its final notice tells.

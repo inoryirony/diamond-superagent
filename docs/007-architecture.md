@@ -440,6 +440,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |
 | `tests/eval-sessions.spec.ts` | Each Eval in a Session of its own: its candidate, tools and title; every open Ticket on the card; a message steered into a running Eval, routed there or left to the next; what stays on the main Session |
 | `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
+| `tests/reviews.spec.ts` | A review of a result in a Session of its own: passing, returning with findings, its rounds, and one that ends without a verdict |
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |

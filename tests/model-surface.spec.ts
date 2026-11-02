@@ -13,7 +13,7 @@ import { promptParts } from '../src/app/prompts.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { Runtime } from '../src/app/runtime.ts'
-import { workerSessionId } from '../src/executor/dsh.ts'
+import { reviewerSessionId, workerSessionId } from '../src/executor/dsh.ts'
 import { Store } from '../src/app/store.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { inputMessage } from '../src/executor/dsh.ts'
@@ -25,7 +25,7 @@ import { githubKind } from '../src/sources/github.ts'
 import { testMachine } from './fixtures/deployment.ts'
 
 type Role = 'orchestrator' | 'worker'
-interface Surface { where: string; owner: string; role: Role | 'both'; text: string }
+interface Surface { where: string; owner: string; role: Role | 'both' | 'reviewer'; text: string }
 interface Tool {
   name: string; description: string; parameters: unknown
   execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown>
@@ -199,11 +199,12 @@ async function drive(host: Host) {
   await runtime.pump()
   await runtime.idle()
   await run(workerA, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
+  // The ready result waits in a review of its own. No model answers a Reviewer Session here, so the review may end without a
+  // verdict, which leaves the result to a person as a ready result used to; the walkthrough never waits on it. The message
+  // that follows reaches the ticket, or queues behind its review, and either way the drive's own checks below still hold.
+  await vi.waitFor(() => expect(runtime.store.tickets.get(a)!.reviews).toHaveLength(1), { timeout: 3000 })
   await runtime.receive(feishu('2', '再加一个按钮', { mentions: [], root_id: 'om_1' }))
-  await vi.waitFor(async () => {
-    await runtime.pump()
-    expect(runtime.store.tickets.get(a)!.inputs.some(input => input.kind === 'resumed')).toBe(true)
-  })
+  await runtime.pump()
   const policy = runtime.store.settings().policy
   // The rule ticket b was accepted under changes, so its worker is told how; the one it was not is disabled, which tells no one.
   const rules = policy.rules.map(rule => rule.id === 'visual' ? { ...rule, enabled: false }
@@ -217,7 +218,6 @@ async function drive(host: Host) {
   // Resume runs once the status request reached the worker (whose Assignment is then busy rather than settled), so it gets the recovery note.
   await runtime.idle()
   expect(runtime.store.tickets.get(b)!.undelivered).toEqual([])
-  runtime.executor.resume()
   await runtime.pump()
   await runtime.idle()
   return { a, b, workerA, workerB, refusal }
@@ -235,13 +235,21 @@ function walk(node: unknown, visit: (node: Record<string, unknown>, property?: s
   }
 }
 
+/** Surfaces the walkthrough does not reach while tickets wait in review rather than ending and resuming. */
+const REVIEWED = ['orchestrator input ticket_ended', 'worker input resumed', 'worker input recovery']
+/** The Reviewer Session the walkthrough's review opened, which `failures` reads its tools from. */
+let reviewerSession: string | undefined
 /** Collect all model-visible text surfaces (prompt sections, tool schemas, skills, errors, and session inputs) with their owning module. */
 function collect(host: Host, { a, b, workerA, workerB, refusal }: Awaited<ReturnType<typeof drive>>): Surface[] {
   const { runtime } = host
   const surfaces: Surface[] = []
   const config = runtime.prompts.current().config
   const shared = new Set(['runtime/shared', 'communication', 'scope', 'delivery', 'runtime/subscriptions', 'runtime/replies'])
-  for (const [role, sessionId] of [['orchestrator', runtime.masterId], ['worker', workerA], ['worker', workerB]] as const) {
+  // The reviewer's Session is created by the review the drive's ready result asked for, if its effect started it by now.
+  const reviewer = reviewerSession = [...Array(3).keys()].map(round => reviewerSessionId(a, round + 1)).find(id => host.sections.has(id))
+  const roles = [['orchestrator' as const, runtime.masterId], ['worker' as const, workerA], ['worker' as const, workerB],
+    ...reviewer ? [['reviewer' as const, reviewer] as const] : []] as const
+  for (const [role, sessionId] of roles) {
     const parts = promptParts(config, role)
     for (const { name, text } of parts) {
       surfaces.push({ where: `${role} prompt ${name}`, owner: PROMPTS, role: shared.has(name) ? 'both' : role, text })
@@ -308,7 +316,9 @@ function failures(): Map<string, string> {
   })
   for (const name of ['decision', 'purpose', 'state']) expect(options.has(name), `${name} has options`).toBe(true)
   const tools = { orchestrator: new Set(toolsOf('orchestrator').keys()), worker: new Set(toolsOf('worker').keys()) }
-  const registered = (token: string) => tools.orchestrator.has(token) || tools.worker.has(token)
+  // A Reviewer Session's own tools count as registered for the texts only it reads.
+  const reviewerTools = new Set(reviewerSession ? [...host.tools.get(reviewerSession)?.keys() ?? []] : [])
+  const registered = (token: string) => tools.orchestrator.has(token) || tools.worker.has(token) || reviewerTools.has(token)
   const variables = new Set(host.runtime.ticketEnvironment(host.runtime.store.tickets.get(sessions.a)!).map(variable => variable.key))
   for (const { where, owner, role, text } of surfaces) {
     const fail = (problem: string) => found.set(`${where}: ${problem}`, owner)
@@ -363,7 +373,16 @@ it('collects both roles\' tools, prompts, skills and inputs', () => {
     'orchestrator input thread_unrelated', 'orchestrator input ticket_ended', 'orchestrator input settings_saved', 'worker input assignment (explicit)',
     'worker input assignment (inferred)', 'worker input policy-changed', 'worker input resumed', 'worker input status',
     'worker input recovery', 'worker input note', 'worker input trigger (context)', 'orchestrator input follow_up',
-    'orchestrator input thread_followed', 'orchestrator tool orchestrator_reply error']) expect(wheres).toContain(where)
+    'orchestrator input thread_followed', 'orchestrator tool orchestrator_reply error'].filter(where =>
+      !REVIEWED.includes(where))) expect(wheres).toContain(where)
+  // A result that passes its review reaches the main Session as the ready result did before reviews existed, and the
+  // walkthrough's tickets wait in review rather than ending, so no end notice is a surface of its own here.
+  expect(wheres).toContain('orchestrator input worker_report')
+  // Neither an end notice nor a resume happens while a ticket waits in review, which is where this walkthrough leaves its own.
+  for (const where of REVIEWED) expect(wheres).not.toContain(where)
+  // The Reviewer's own prompt and verdict tool are part of the surface too.
+  const verdicts = surfaces.filter(surface => surface.where === 'reviewer prompt runtime/reviewer')
+  expect(verdicts.length).toBeGreaterThan(0)
   expect(sessions.refusal).not.toBe('')
 })
 

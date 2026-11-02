@@ -190,7 +190,10 @@ it('tells the main Session of a follow-up to an ended ticket once the ticket res
   h = await startRuntime()
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done' })
-  expect(h.runtime.store.tickets.get(ticket.id)!.ended).toBeDefined()
+  // The ready result waits in a review of its own, and passing it ends the ticket, which the message then resumes.
+  await vi.waitFor(() => expect(h!.runtime.store.tickets.get(ticket.id)!.reviews).toHaveLength(1))
+  await h.finishReview(ticket.id)
+  expect(h.runtime.store.tickets.get(ticket.id)!.reviews![0]!.ended).toMatchObject({ outcome: 'passed' })
   // While processing is paused the message waits for the ticket, which has not resumed: the main Session hears nothing yet.
   await h.runtime.settings.pause(true, 'panel')
   h.deliveries.mockClear()

@@ -254,6 +254,11 @@ export class DshExecutor implements Executor {
     host.effects.handle('delivery', payload => this.deliverQueued(payload.ticketId), { limit: () => host.paused() ? 0 : 4, quiet: true })
     // A review runs beside the workers rather than in their slots: it reads and runs checks, and never holds a launch back.
   }
+  /**
+   * Whether results are reviewed before the ticket delivers or ends them, which the host sets from the executor settings;
+   * read at each ready report, so switching the phase needs no restart.
+   */
+  reviews: () => boolean = () => false
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
     return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }

@@ -153,6 +153,8 @@ export class Runtime extends Service implements SourceHost {
         deploy: () => { const e = store.settings().executor; return e.deploy ? { command: e.deployCommand, e2e: e.e2eCommand } : undefined } })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
+      // The Executor reviews results as long as the settings say so, read at each report: the phase is configurable at runtime.
+      executor.reviews = () => store.settings().executor.reviews
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         ...store.settings().executor.reviews ? { reviewer: reviewers } : {},
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
