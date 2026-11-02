@@ -4,7 +4,7 @@ import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
 import { LIMITS } from '../limits.ts'
 import { blockingProblem } from '../setup.ts'
 import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
-import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
+import { DisclosureRow, Icon, InfoTip, Input, Pill, Switch } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { usePanel } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
@@ -101,6 +101,25 @@ export function ExecutionSettings() {
           <Field label={t('maxWorkers')} hint={t('maxWorkersHint')}>
             <Input type="number" min={LIMITS.maxWorkers.min} max={LIMITS.maxWorkers.max} required value={value.maxWorkers}
               onChange={event => edit({ maxWorkers: event.target.value })} />
+          </Field>
+        </div>
+        <div className="dt-form dt-block">
+          <h2 className="dt-block-title">{t('pipelineStages')}<InfoTip text={t('pipelineIntro')} /></h2>
+          <Field label={t('phaseReview')} hint={t('phaseReviewHint')}>
+            <Switch checked={value.reviews} onChange={reviews => edit({ reviews })} label={t('phaseReview')} />
+          </Field>
+          <Field label={t('phaseDeploy')} hint={t('phaseDeployHint')}>
+            <Switch checked={value.deploy} onChange={deploy => edit({ deploy })} label={t('phaseDeploy')} />
+          </Field>
+          <Field label={t('deployCommand')} hint={t('deployCommandHint')}>
+            <textarea className="dt-textarea dt-mono" rows={2} maxLength={LIMITS.deployCommand} spellCheck={false}
+              placeholder={t('deployCommandEmpty')} value={value.deployCommand}
+              onChange={event => edit({ deployCommand: event.target.value })} />
+          </Field>
+          <Field label={t('e2eCommand')} hint={t('e2eCommandHint')}>
+            <textarea className="dt-textarea dt-mono" rows={2} maxLength={LIMITS.e2eCommand} spellCheck={false}
+              placeholder={t('deployCommandEmpty')} value={value.e2eCommand}
+              onChange={event => edit({ e2eCommand: event.target.value })} />
           </Field>
         </div>
         <div className="dt-form dt-block">
