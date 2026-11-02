@@ -38,7 +38,8 @@ async function list(commands: Commands, ref: DingtalkAddress, time: string, dire
   const items = page.messages ?? z.looseObject({ messages: z.array(z.unknown()).optional() }).parse(page.data).messages ?? []
   return items.flatMap(item => { const parsed = MessageSchema.safeParse(item); return parsed.success ? [parsed.data] : [] })
 }
-const timeOf = (message: Message): string => dingtalkTime(message)
+// A listed message carries its time as `createTime`, where an event carries `create_time`; both forms reach `dingtalkTime`.
+const timeOf = (message: Message): string => dingtalkTime({ timestamp: message.timestamp, create_time: message.createTime })
 export function dingtalkView(message: Message): ContextMessage {
   const body = message.text ?? message.content ?? ''
   return { id: String(message.openMessageId ?? message.messageId ?? message.openMessage ?? ''), from: message.sender ?? '',
