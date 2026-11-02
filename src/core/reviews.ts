@@ -63,6 +63,11 @@ export class Reviews extends EnginePart {
     if (report.unfinished) return this.require(ticketId)
     if (report.outcome === 'passed') { this.tickets.finishReviewed(ticketId, at); return this.require(ticketId) }
     if (report.findings?.length && review.round < REVIEW_ROUNDS) { this.tickets.returned(ticketId, report); return this.require(ticketId) }
+    // The rounds are spent with the result still returned: nothing runs on its own any more, so the main Session is told what
+    // the reviewer kept finding. It may start the worker again with a narrower instruction or hand the ticket to a person;
+    // until it does, the ticket waits at `person / returned`.
+    if (report.findings?.length) this.emit('ticket.reviewRoundsSpent',
+      { ticketId, round: review.round, assignmentId: review.assignmentId, findings: report.findings })
     return this.require(ticketId)
   }
   /** Stop the review running on `ticket`, such as when a person stops the ticket. */

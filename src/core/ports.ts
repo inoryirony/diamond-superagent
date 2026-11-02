@@ -132,6 +132,12 @@ export interface DomainEvents {
   'assignment.ended': { ticketId: string; assignmentId: string; reason: string }
   /** A ticket's result went to review: the round, and the Assignment whose result it judges. */
   'ticket.reviewing': { ticketId: string; round: number; assignmentId: string }
+  /**
+   * A review returned a result in its last round: the rounds are spent, so nothing more happens on its own. The main
+   * Session decides what comes next — start the worker again with a narrower instruction, change the approach, or leave it
+   * to a person. Emitted instead of silently parking the ticket, so the orchestrator learns why the worker keeps failing.
+   */
+  'ticket.reviewRoundsSpent': { ticketId: string; round: number; assignmentId: string; findings: string[] }
   'thread.subscribed': { threadKey: string; ticketId: string }
   /** A person dropped every ticket's Subscription, or a ticket's Executor its own, for `reason`. */
   'thread.unsubscribed': { threadKey: string; ticketId: string; by: 'person' | 'executor'; reason?: string }

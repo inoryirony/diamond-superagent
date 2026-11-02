@@ -171,6 +171,19 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, { sessionId: agent.id }, signal)),
     routeTool(host),
     tool({
+      name: 'orchestrator_ticket_restart',
+      description: 'Start a fresh assignment on a ticket whose review rounds are spent, with an instruction that names what the reviewer '
+        + 'kept finding. Use it when you can act on those findings; leave the ticket to a person when only a person can decide.',
+      schema: z.object({
+        ticket_id: z.string(),
+        instruction: z.string().trim().min(1).max(4000).describe('What the next worker must do differently, with the findings you are acting on and any direction you add.'),
+      }).strict(),
+      execute: async args => {
+        host.engine.restartTicket(args.ticket_id, args.instruction)
+        return routed(host, { reason: 'Started a fresh assignment with an instruction', ticketId: args.ticket_id })
+      },
+    }),
+    tool({
       name: 'orchestrator_ticket_retry',
       description: 'Start a new assignment on an explicit human request to retry a ticket whose worker reported failed or blocked, or whose input was not delivered; the stalled one ends.',
       schema: z.object({ ticket_id: z.string() }).strict(),

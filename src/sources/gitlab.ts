@@ -29,7 +29,7 @@ export const gitlabKind: SourceKind<GitlabConfig> = {
   health: [SOURCE],
   environment: {
     variables: [
-      { key: 'DSH_SUPERAGENT_GITLAB_MR', description: { zh: '这个来源监听的 GitLab group。智能体用 glab 从 dev 切出分支 agent/$DSH_SUPERAGENT_NAME，开目标为 test 的 MR（glab mr create --fill）时，MR 会关联到工单；没有配置 GitLab 时为空', en: 'The GitLab group this Source watches. An MR the agent opens with glab from a branch agent/$DSH_SUPERAGENT_NAME cut from dev, targeting test (glab mr create --fill), binds to the ticket; empty when GitLab is not configured' } },
+      { key: 'DSH_SUPERAGENT_GITLAB_MR', description: { zh: '这个来源监听的 GitLab group。智能体从 dev 切出分支 agent/$DSH_SUPERAGENT_NAME 并开合并请求，再在工单上报 mr 时绑定；没有配置 GitLab 时为空。ZKAI 仓库的分支纪律是先进 dev，由人把 dev 提升到 test 才部署测试环境', en: 'The GitLab group this Source watches. A merge request the agent opens from a branch named after the ticket binds to the ticket through the report\'s `mr`; empty when GitLab is not configured. The ZKAI repositories move work into dev first, and a person promotes dev to test to deploy the test environment' } },
       { key: 'DSH_SUPERAGENT_GITLAB_URL', description: { zh: '这个工单发起时的 GitLab 地址；要让部署与端到端检查用它确认 MR 已经上线，需要改由 `orchestrator_read` 读取工单跟随的 MR', en: 'The GitLab URL of the message that started this ticket; a deploy or end-to-end check that confirms the MR is live reads the MR the ticket follows with orchestrator_read instead' } },
     ],
     values: ({ deployment, trigger }) => ({ DSH_SUPERAGENT_GITLAB_MR: deployment.gitlab?.group ?? '',

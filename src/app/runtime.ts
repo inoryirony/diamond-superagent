@@ -193,6 +193,12 @@ export class Runtime extends Service implements SourceHost {
         get problems() { return setup.problems }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+        // A deployment runs a GitHub account, a GitLab one, or neither; a report names its change on whichever exists, and the
+        // tool skips the account it does not have instead of throwing with the whole report.
+        get hasGithub() { return !!setup.configured() && !!setup.deployment.github },
+        get hasGitlab() { return !!setup.configured() && !!setup.deployment.gitlab },
+        commands,
+        get gitlabContext() { return runtime.context({ kind: 'gitlab', health: ['gitlab'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()

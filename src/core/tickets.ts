@@ -166,6 +166,29 @@ export class Tickets extends EnginePart {
     return this.require(ticketId)
   }
   /**
+   * Starts a fresh assignment on a live ticket whose review rounds are spent, with `instruction` as its first input, so the
+   * main Session can act on what the reviewer kept finding instead of leaving the work parked. The worker that failed ends.
+   * @throws UserError when the ticket is unknown, ended, or has a review still running.
+   */
+  restartReviewSpent(ticketId: string, instruction: string): Ticket {
+    const ticket = this.require(ticketId)
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    if (ticket.reviews?.some(review => !review.ended)) throw new UserError('reviewRunning')
+    const latest = latestAssignment(ticket)
+    if (latest) {
+      this.endAssignment(ticket, latest, 'restarted')
+      this.requeueUntaken(ticket, latest)
+    }
+    const assignment = this.newAssignment(ticket)
+    const at = this.now()
+    const input: TicketInput = { id: key('input', ticketId, 'restart', assignment.id), kind: 'text', text: instruction, at }
+    ticket.inputs.push(input); ticket.undelivered.push(input.id); ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+    if (latest) this.options.executor.stop(ticket, latest, 'restarted')
+    this.options.executor.start(ticket, assignment)
+    return ticket
+  }
+  /**
    * Ends the stalled assignment of a retryable open ticket (`failed`, `blocked`, or failed input delivery) and starts a new one.
    * @throws UserError when the ticket is unknown or not retryable.
    */

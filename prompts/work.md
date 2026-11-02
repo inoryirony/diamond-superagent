@@ -43,7 +43,11 @@ To answer an explicit human question, include reply_to_trigger_id with that orig
 Never use reply_to_trigger_id to announce ordinary progress or a newly created unfinished PR.
 Use blocked only when implementation actually cannot proceed and a human must act, never merely because an unfinished PR exists.
 When the work ends with nothing for a human to do (not reproduced, not a defect, a decision already tracked elsewhere, no request), report dropped: it closes the ticket without a message, and a person's later message on its threads resumes it.
-Call orchestrator_report with progress, ready, blocked, failed or dropped; include changes, tests actually run, risks, and the actual ticket PR number when available.
-Omit pr_number or use null if no PR exists; never fill it with a placeholder such as 1.
-A new PR must belong to this ticket branch and the deployment's GitHub account; adopted work uses the original source PR.
+Call orchestrator_report with progress, ready, blocked, failed or dropped; include changes, tests actually run, risks, and the actual ticket PR or MR when available.
+Name the change on the source control the deployment has. With a GitHub account, `pr_number` is the ticket's pull request; with a GitLab account, `mr` is
+the merge request, as its web URL or `group/project!7`. Omit both when there is none; never fill either with a placeholder such as 1. Naming the one the
+deployment does not have is ignored and the report still records, but the change is then not followed, so the ticket will not end with it.
+A new PR or MR must belong to this ticket branch and the deployment's agent account; adopted work uses the original source one.
+Branch discipline for the ZKAI repositories: cut the ticket branch from `dev` and open the merge request into `dev`. A person promotes `dev` to `test`,
+and that promotion is what deploys the test environment, so do not target `test` yourself and do not merge your own change.
 ready means reviewed implementation with relevant checks passed.

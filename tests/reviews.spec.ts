@@ -99,32 +99,32 @@ it('leaves the result to a person when the review ends without a verdict', async
   expect(ticketOf(host, ticket.id).reviews![0]!.ended!.summary).toContain('did not finish')
 })
 
-it('runs the deploy command before the verdict, and returns the result with its failure as the finding', async () => {
+it('hands the verify commands to the Reviewer, so the verifier runs them itself instead of a subprocess beside its turn', async () => {
   h = await startRuntime()
   const host = h
-  // Turn the deploy phase on with a command that fails, as a test environment that did not take the change would.
   await setExecutor(host, { reviews: true, deploy: true, deployCommand: 'deploy-now', e2eCommand: 'checks-now' })
-  host.failures.set('deploy-now', new Error('the test branch refused the merge'))
   const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot 修一下回归'))
   await host.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
-  // The review runs the deploy command first; its failure returns the result to the worker with the command's output.
-  await vi.waitFor(() => expect(ticketOf(host, ticket.id).reviews?.[0]?.ended).toBeDefined(), { timeout: 5000 })
-  const ended = ticketOf(host, ticket.id).reviews![0]!.ended!
-  expect(ended.outcome).toBe('returned')
-  expect(ended.summary).toContain('not on the test environment working')
-  expect(ended.findings!.join('\n')).toContain('the test branch refused the merge')
-  expect(ticketOf(host, ticket.id).ended).toBeUndefined()
+  // The review's opening message carries the two commands, and nothing runs them outside the Reviewer's Session.
+  await vi.waitFor(() => {
+    const opening = host.deliveries.mock.calls.map(([call]) => call)
+      .find(call => call.sessionId === reviewerSessionId(ticket.id, 1))
+    expect(opening?.text).toBeDefined()
+    expect(JSON.parse(opening!.text)).toMatchObject({ verify: { command: 'deploy-now', e2e: 'checks-now' } })
+  }, { timeout: 5000 })
+  expect(host.subprocess.spawn.mock.calls.some(([spec]) => (spec.argv as string[]).includes('deploy-now'))).toBe(false)
 })
 
-it('notes what the deploy phase ran when both commands pass, so the review can pass the result', async () => {
+it('leaves the verify block out of the opening message when the verify phase is off', async () => {
   h = await startRuntime()
   const host = h
-  await setExecutor(host, { reviews: true, deploy: true, deployCommand: 'deploy-ok', e2eCommand: 'checks-ok' })
+  await setExecutor(host, { reviews: true, deploy: false })
   const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot 修一下回归'))
   await host.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
-  // Both commands pass, so the ticket keeps what the deploy phase ran as a note, and that note names this review's round.
-  await vi.waitFor(() => expect(ticketOf(host, ticket.id).inputs
-    .some(input => input.kind === 'note' && input.text.includes('The deploy phase ran for review 1'))).toBe(true), { timeout: 5000 })
-  expect(ticketOf(host, ticket.id).inputs.find(input => input.kind === 'note')!.text)
-    .toContain('deploy: passed')
+  await vi.waitFor(() => {
+    const opening = host.deliveries.mock.calls.map(([call]) => call)
+      .find(call => call.sessionId === reviewerSessionId(ticket.id, 1))
+    expect(opening?.text).toBeDefined()
+    expect(JSON.parse(opening!.text)).not.toHaveProperty('verify')
+  }, { timeout: 5000 })
 })

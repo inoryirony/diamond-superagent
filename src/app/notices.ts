@@ -64,6 +64,15 @@ export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket |
     return receiptNotice({ thread_unrelated: { ticket_id: ticketId, thread, reason }, at, note },
       `Ticket ${ticketId} no longer follows thread ${thread}: ${reason}`)
   }
+  if (event.type === 'ticket.reviewRoundsSpent') {
+    const { ticketId, round, findings } = event.data
+    // The orchestrator learns both that the work stalled and what the reviewer kept finding, so it can decide with evidence
+    // instead of restating the person's request: restart the worker with a narrower instruction, or hand the ticket over.
+    return receiptNotice({ ticket_review_rounds_spent: { ticket_id: ticketId, round, findings, read: `ticket/${ticketId}` }, at,
+      note: 'Every review round returned this result, so nothing runs on its own. Act on the findings with orchestrator_ticket_restart, '
+        + 'or leave the ticket to a person; orchestrator_read shows the review summaries and the worker transcript.' },
+      `Ticket ${ticketId}: review round ${round} returned the result again, so its rounds are spent`)
+  }
   return undefined
 }
 

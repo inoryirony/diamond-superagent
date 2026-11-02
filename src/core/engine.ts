@@ -169,6 +169,14 @@ export class Engine {
    * @throws UserError when the ticket is unknown, has ended, or is not retryable.
    */
   retryTicket(ticketId: string): Ticket { return this.repo.atomic(() => this.tickets.retry(ticketId)) }
+  /**
+   * Starts a fresh assignment on a live ticket with `instruction` as its first input, for the main Session to act on a
+   * result whose review rounds are spent: the work continues under a narrower instruction instead of waiting for a person.
+   * @throws UserError when the ticket is unknown, ended, or has a review still running.
+   */
+  restartTicket(ticketId: string, instruction: string): Ticket {
+    return this.repo.atomic(() => this.tickets.restartReviewSpent(ticketId, instruction))
+  }
 
   // The Executor
 
@@ -277,7 +285,7 @@ export type EngineForSources = Pick<Engine, 'receive' | 'bindThread' | 'threadCl
 /** What the main Session asks of the Engine. */
 export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'>
 /** What people ask of the Engine, through the panel or the main Session. */
-export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
+export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'restartTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
 /** What Settings tells the Engine. */
 export type EngineForSettings = Pick<Engine, 'policyChanged'>
 /**

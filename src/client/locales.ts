@@ -753,6 +753,7 @@ const TEXT = {
   'userError.ticketStopped': ['有人停止了这个工单；新工作需要通过 orchestrator_route 接单。', USER_ERRORS.ticketStopped[1]],
   'userError.mandateRevoked': ['按当前策略，这个工单的授权已失效；新工作需要通过 orchestrator_route 接单。', USER_ERRORS.mandateRevoked[1]],
   'userError.notRetryable': ['只有进行中的工单可以重试，而且仅当执行器最近一次报告为失败或受阻且此后没有人发过消息，或者向执行器送达输入失败时才可以。', USER_ERRORS.notRetryable[1]],
+  'userError.reviewRunning': ['这个工单还有复核在进行，等它的结论出来，或者先停掉工单。', USER_ERRORS.reviewRunning[1]],
   'userError.sourceThread': ['这是工单开始时所在的线程，会保持订阅。', USER_ERRORS.sourceThread[1]],
   'userError.followedThread': ['这是工单自己的线程，例如它的 PR，会保持订阅。', USER_ERRORS.followedThread[1]],
   'userError.notFollowing': ['这个工单没有订阅那个线程。', USER_ERRORS.notFollowing[1]],
