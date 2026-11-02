@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveFeishuBot, resolveGithub, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, machineOf, resolveDingtalk, resolveFeishuBot, resolveGithub, type Machine, type Probe } from '../src/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -100,5 +100,27 @@ describe('setup', () => {
     await refuses('feishuNoBot')
     program(join(dir, 'bin', 'lark-cli'), 'echo "not configured" >&2; exit 1')
     await refuses('feishuCliFailed', { output: expect.stringContaining('not configured') })
+  })
+  it('reads the DingTalk account from dws, or finds none when the DingTalk Source names neither a CLI nor an open DingTalk ID', async () => {
+    const self = 'open-self-0001'
+    expect(await resolveDingtalk(machine(), {}, probe, path)).toBeUndefined()
+    expect(await resolveDingtalk(machine(), undefined, probe, path)).toBeUndefined()
+    expect(await resolveDingtalk(machine(), { cli: '', openDingtalkId: '' }, probe, path)).toBeUndefined()
+    // Only one of the two fields is set: setup names the one that is missing.
+    await expect(resolveDingtalk(machine(), { openDingtalkId: self }, probe, path)).rejects.toEqual(setupError('dingtalk', 'dingtalkCliUnset'))
+    await expect(resolveDingtalk(machine(), { cli: 'dws' }, probe, path)).rejects.toEqual(setupError('dingtalk', 'dingtalkSelfUnset'))
+    await expect(resolveDingtalk(machine(), { cli: join(dir, 'missing'), openDingtalkId: self }, probe, path))
+      .rejects.toEqual(setupError('dingtalk', 'dingtalkCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }))
+    // A warning line may precede the JSON of both answers.
+    const me = { result: [{ orgEmployeeModel: { userId: 'u1', corpId: 'corp1', orgUserName: 'Alice Zhang' } }] }
+    const dws = (authenticated: boolean): string => `echo 'warning: nested skill'\ncase "$*" in\n  "auth status") echo '{"authenticated":${authenticated}}' ;;\n  "contact user me --format json") echo '${JSON.stringify(me)}' ;;\n  *) exit 1 ;;\nesac`
+    program(join(dir, 'bin', 'dws'), dws(true))
+    expect(await resolveDingtalk(machine(), { cli: 'dws', openDingtalkId: self }, probe, path))
+      .toEqual({ cli: join(dir, 'bin', 'dws'), openDingtalkId: self, userId: 'u1', name: 'Alice Zhang', corpId: 'corp1' })
+    program(join(dir, 'bin', 'dws'), dws(false))
+    await expect(resolveDingtalk(machine(), { cli: 'dws', openDingtalkId: self }, probe, path)).rejects.toEqual(setupError('dingtalk', 'dingtalkSignedOut'))
+    program(join(dir, 'bin', 'dws'), 'echo "boom" >&2; exit 1')
+    await expect(resolveDingtalk(machine(), { cli: 'dws', openDingtalkId: self }, probe, path))
+      .rejects.toEqual(setupError('dingtalk', 'dingtalkSignedOut', { output: expect.stringContaining('boom') }))
   })
 })

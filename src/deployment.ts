@@ -47,12 +47,16 @@ export const GithubAccountsSchema = z.object({
   cli: z.string().trim().default(''),
 })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
+/** The operator's DingTalk account: the `dws` CLI and the operator's own open DingTalk ID, which no API returns and so is entered by hand. */
+export const DingtalkAccountSchema = z.object({ cli: z.string().trim().default(''), openDingtalkId: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape), dingtalk: Object.keys(DingtalkAccountSchema.shape) }
 
 export interface GithubAccount { cli: string; login: string; noreply: string; repository: string }
-export interface Deployment extends Machine { github?: GithubAccount; feishu?: FeishuBot }
+export interface Deployment extends Machine { github?: GithubAccount; feishu?: FeishuBot; dingtalk?: DingtalkAccount }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+/** The signed-in DingTalk account `dws` acts as; `openDingtalkId` is the operator-entered ID that tells the account's own messages apart. */
+export interface DingtalkAccount { cli: string; openDingtalkId: string; userId: string; name: string; corpId: string }
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -126,4 +130,26 @@ export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe:
   const info = parsed(BotInfo, (await run('api', 'GET', '/open-apis/bot/v3/info', '--as', 'bot', '--format', 'ndjson')).split('\n')[0] ?? '')
   if (!info) return fail(new SetupError('feishuNoBot'))
   return { cli, appId: status.appId, brand: status.brand, botId: info.bot.open_id, name: info.bot.app_name }
+}
+
+const DingtalkAuth = z.object({ authenticated: z.boolean() })
+const DingtalkSelf = z.object({ result: z.array(z.object({ orgEmployeeModel: z.object({ userId: z.string().min(1), corpId: z.string().default(''), orgUserName: z.string().default('') }) })).min(1) })
+/**
+ * Verify the operator's DingTalk CLI is signed in and read the account it acts as; with both fields empty the Source is not configured, which is not a problem.
+ * The open DingTalk ID is entered by hand because no API returns it.
+ */
+export async function resolveDingtalk(machine: Machine, dingtalk: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<DingtalkAccount | undefined> {
+  const account = DingtalkAccountSchema.parse(dingtalk ?? {})
+  if (!account.cli && !account.openDingtalkId) return undefined
+  if (!account.cli) throw new SetupError('dingtalkCliUnset')
+  if (!account.openDingtalkId) throw new SetupError('dingtalkSelfUnset')
+  let cli: string
+  try { cli = executable(account.cli, path, workerBin(machine.stateDir)) } catch (error) { throw new SetupError('dingtalkCliMissing', { output: reason(error) }) }
+  const run = (...args: string[]): Promise<string> => probe([cli, ...args]).catch((error: unknown) => { throw new SetupError('dingtalkSignedOut', { output: reason(error) }) })
+  // `dws` may print a warning line before its JSON.
+  const json = (text: string): string => text.slice(text.indexOf('{'))
+  if (!parsed(DingtalkAuth, json(await run('auth', 'status')))?.authenticated) throw new SetupError('dingtalkSignedOut')
+  const me = parsed(DingtalkSelf, json(await run('contact', 'user', 'me', '--format', 'json')))?.result[0]?.orgEmployeeModel
+  if (!me) throw new SetupError('dingtalkSignedOut')
+  return { cli, openDingtalkId: account.openDingtalkId, userId: me.userId, name: me.orgUserName, corpId: me.corpId }
 }

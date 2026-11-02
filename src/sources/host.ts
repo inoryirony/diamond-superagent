@@ -12,6 +12,7 @@ export const HEALTH_TEXT = {
   setupPending: 'Waiting for the deployment check',
   sourceOff: 'Off',
   feishuCliUnset: 'The Source is on, and its bot lark-cli is not set',
+  dingtalkCliUnset: 'The Source is on, and its dws CLI or your open DingTalk ID is not set',
   githubUnset: 'The Source is on, and its repository or agent CLI is not set',
   feishuBotMissing: 'Waiting for the Feishu bot',
   pollFailures: '{count} consecutive failed polls; last: {error}',

@@ -194,7 +194,7 @@ export class Runtime extends Service implements SourceHost {
   get problems(): readonly SetupProblem[] { return this.setup.problems }
   links(): LinkTarget {
     const resolved = this.setup.configured() ? this.setup.deployment : undefined
-    const links: ChannelLinks = { ...resolved?.github ? { github: resolved.github } : {}, ...resolved?.feishu ? { feishu: resolved.feishu } : {} }
+    const links: ChannelLinks = { ...resolved?.github ? { github: resolved.github } : {}, ...resolved?.feishu ? { feishu: resolved.feishu } : {}, ...resolved?.dingtalk ? { dingtalk: resolved.dingtalk } : {} }
     return channel => this.sources.link(channel, links)
   }
   ticketEnvironment(ticket: Ticket): Variable[] {

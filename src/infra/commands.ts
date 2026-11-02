@@ -116,6 +116,23 @@ export class Commands {
     if (!result.ok) throw membership(new CliError(`${result.error?.message ?? 'Feishu command failed'}${code ? ` (${code})` : ''}`, code))
     return result.data
   }
+  /**
+   * Runs the DingTalk account's `dws` and parses its JSON output, which a warning line may precede.
+   * A network failure is retried up to three times; any other failure is thrown as a CliError.
+   */
+  async dws<T>(args: string[], cwd?: string): Promise<T> {
+    const account = this.deployment.dingtalk
+    if (!account) throw new Error('The DingTalk Source has no working account CLI')
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const output = await this.run(account.cli, args, cwd)
+        return JSON.parse(output.slice(output.indexOf('{'))) as T
+      } catch (error) {
+        if (attempt >= 3 || !/NETWORK_ERROR|network/i.test(error instanceof Error ? error.message : '')) throw error
+        await new Promise(resolve => setTimeout(resolve, attempt * 1000))
+      }
+    }
+  }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
 }
