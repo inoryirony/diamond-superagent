@@ -5,6 +5,7 @@ import { latestAssignment, liveTicket, runningAssignment } from './model.ts'
 import type { ReportState, Ticket } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
+import type { Reviews } from './reviews.ts'
 import { automatic, type Tickets } from './tickets.ts'
 
 /** What an Assignment reports: a worker's report, or the Executor's own (`waiting` after an idle turn, `failed` after an error). */
@@ -28,7 +29,10 @@ const RECOVERY_NOTE = 'The host restarted during this ticket. Inspect the curren
  * Executor's lifecycle callbacks and its workers' reports here.
  */
 export class Assignments extends EnginePart {
+  private reviews: Reviews | undefined
   constructor(options: EngineOptions, private readonly tickets: Tickets, private readonly replies: Replies) { super(options) }
+  /** Connects the part that reviews results; `Tickets` creates it after this part, since both read each other's verdicts. */
+  use(reviews: Reviews): void { this.reviews = reviews }
 
   /** Marks a non-ended assignment running, queues delivery of waiting undelivered inputs on an open ticket, and emits `assignment.started`. */
   started(ticketId: string, assignmentId: string): void {
@@ -125,6 +129,9 @@ export class Assignments extends EnginePart {
     if (report.answers) this.takeUp(ticketId, report.answers)
     if (report.state === 'blocked' || report.state === 'failed') ticket.undelivered = ticket.undelivered.filter(id => !automatic(ticket.inputs.find(input => input.id === id)))
     this.repo.tickets.save(ticket)
+    // With reviews on, a ready result is judged before the ticket delivers or ends it: the review then passes it on as the
+    // report would have, or returns it to the worker with findings.
+    if (report.state === 'ready' && this.reviews?.required(ticket)) { this.reviews.start(ticket, assignment); return this.require(ticketId) }
     // A ticket that follows Threads ends with them: a ready report ends it only once followsDone holds, with that outcome.
     const ready = !ticket.follows?.length ? 'completed' : this.tickets.followsDone(ticket)?.outcome
     // A dropped report after a close the ticket deferred ends it as the close did, which its final notice tells.

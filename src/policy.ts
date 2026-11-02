@@ -94,6 +94,18 @@ export const ExecutorConfigSchema = z.object({
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
+  /**
+   * The phases between a worker's result and its person, in order, each switchable; the Defaults of `docs/003` describe them.
+   * `review`: a Reviewer Session judges the result before the ticket delivers it, and returns it to the worker with findings
+   * it fails. `deploy`: the review deploys the branch to a test environment and runs its end-to-end checks before passing the
+   * result. A phase that cannot run waits for a person rather than passing unchecked.
+   */
+  reviews: z.boolean().default(true),
+  deploy: z.boolean().default(false),
+  /** Run for a review that deploys the branch, in the ticket directory, with the ticket's execution environment: 0 fails it. */
+  deployCommand: z.string().max(LIMITS.deployCommand).default(''),
+  /** Run after `deployCommand` succeeded, with the ticket's execution environment: 0 passes the end-to-end checks. */
+  e2eCommand: z.string().max(LIMITS.e2eCommand).default(''),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({

@@ -22,8 +22,27 @@ import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubag
 const now = (): string => new Date().toISOString()
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
 export const workerSessionId = (ticketId: string): string => `worker-${ticketId}`
-/** Returns the ticket ID for a worker session ID (`worker-<ticketId>`), or undefined for non-worker sessions. */
-export const ticketOfSession = (sessionId: string): string | undefined => sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
+/**
+ * Returns the reviewer session ID of review `round` of a ticket (`reviewer-<ticketId>-<round>`): each review gets a Session of
+ * its own, so a later round reads the result afresh instead of the reasoning of the round before.
+ */
+export const reviewerSessionId = (ticketId: string, round: number): string => `reviewer-${ticketId}-${round}`
+/** Returns the ticket ID for a worker or reviewer session ID, or undefined for non-ticket sessions. */
+export const ticketOfSession = (sessionId: string): string | undefined => {
+  if (sessionId.startsWith('worker-')) return sessionId.slice('worker-'.length)
+  const match = /^reviewer-(.+)-(\d+)$/.exec(sessionId)
+  return match ? match[1] : undefined
+}
+/** Returns the review round of a reviewer session ID, or undefined for any other session. */
+export const roundOfSession = (sessionId: string): number | undefined => {
+  const match = /^reviewer-(.+)-(\d+)$/.exec(sessionId)
+  return match ? Number(match[2]) : undefined
+}
+/** Whether a session ID names a Reviewer Session. */
+export const isReviewerSession = (sessionId: string): boolean => sessionId.startsWith('reviewer-')
+/** A short Session title for a review of a ticket's result: the round and the ticket's title. */
+export const reviewTitle = (ticket: Pick<Ticket, 'title'>, round: number): string =>
+  `review ${round} ${ticket.title.replace(/\s+/g, ' ').slice(0, 40)}`
 /** Maximum runtime for a workspace prepare command. */
 const PREPARE_TIMEOUT_MS = 10 * 60_000
 /** Maximum transient retry attempts for a launch or worker turn, and the initial backoff before resuming a turn. */
@@ -59,7 +78,7 @@ const ticketWorktreeName = (name: string, id: string): string => `${WorktreeName
 export interface ExecutorHost {
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
   readonly context: Context
-  /** Where the Executor reports what happened to Assignments and Inputs. */
+  /** Where the Executor and its reviewers report what happened to Assignments, reviews and Inputs. */
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted'>
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
@@ -233,6 +252,7 @@ export class DshExecutor implements Executor {
       retry: [5000, 300_000] })
     // Failed input deliveries are recorded on the ticket itself rather than reported through the `delivery` effect health entry (`quiet: true`).
     host.effects.handle('delivery', payload => this.deliverQueued(payload.ticketId), { limit: () => host.paused() ? 0 : 4, quiet: true })
+    // A review runs beside the workers rather than in their slots: it reads and runs checks, and never holds a launch back.
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
@@ -366,6 +386,18 @@ export class DshExecutor implements Executor {
       // Its shell jobs and subagents stop with it, also those of a worker that ends its own turn.
       this.stopWork(ticket.id, reason)
       this.left.get(ticket.id)?.collect.abort(); this.left.delete(ticket.id); this.personal.delete(ticket.id)
+    })
+  }
+  /**
+   * A review sent the result back: the worker's turn of that assignment ends, with the input the next assignment carries, so
+   * the revision starts from the findings rather than continuing beside them.
+   */
+  returned(ticket: Ticket, assignment: Assignment, reason: string): void {
+    this.transient.delete(assignment.id)
+    const sessionId = workerSessionId(ticket.id)
+    this.host.store.afterCommit(() => {
+      this.host.context.agents.get(sessionId as SessionId)?.cancel({ kind: 'user' }, { keepInbox: false })
+      this.stopWork(ticket.id, reason)
     })
   }
   /** Stop what a ticket's worker runs in the background (see `stopBackground`). */

@@ -15,7 +15,8 @@ import { feishuKind, feishuTrigger } from '../../src/sources/feishu.ts'
 import { githubKind } from '../../src/sources/github.ts'
 import { Commands } from '../../src/infra/commands.ts'
 import { credentialHelper, workerGitConfig } from '../../src/infra/environment.ts'
-import type { Trigger } from '../../src/core/index.ts'
+import { reviewerSessionId } from '../../src/executor/dsh.ts'
+import type { ReviewReport, Trigger } from '../../src/core/index.ts'
 import { testMachine } from './deployment.ts'
 
 export const MEMBER = 'ou_alice'
@@ -257,6 +258,10 @@ export async function startRuntime(seed?: (store: Store) => void) {
     policy: { ...settings.policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } },
     sources: { ...sources, feishu: { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
   deliveries.mockClear()
+  // Reviews answer every round with the configured verdict, as a Reviewer Session would: the verdict `reviews(answer)` names,
+  // or `passed` when it names none. A test sets the answer before the result whose review it judges.
+  const reviews: { verdict: ReviewReport; sessions: string[] } = { verdict: { outcome: 'passed', summary: 'Checked the diff and ran the tests.' }, sessions: [] }
+  runtime.reviewers.answer = () => reviews.verdict
 
   /** Parsed JSON payloads delivered to `sessionId`. */
   const relays = (sessionId: string) => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId === sessionId)
@@ -268,6 +273,18 @@ export async function startRuntime(seed?: (store: Store) => void) {
   /** The Eval Session that last received the candidate card of `triggerId`, else the main Session, which routes explicit requests too. */
   const evalSession = (triggerId: string) => deliveries.mock.calls.map(([call]) => call)
     .filter(call => call.sessionId.startsWith('eval-') && (JSON.parse(call.text) as { trigger_id?: string }).trigger_id === triggerId).at(-1)?.sessionId ?? runtime.masterId
+  /** Answers every following review with `verdict`, as the Reviewer Session of that round would. */
+  const review = (verdict: ReviewReport) => { reviews.verdict = verdict }
+  /**
+   * Finishes the review running on `ticketId` with the answer a Reviewer Session gives: the verdict `review` set, unless
+   * `verdict` names another. It runs in the review's own Session, which a test steps through like any other.
+   */
+  const finishReview = async (ticketId: string, verdict?: ReviewReport) => {
+    const ticket = runtime.store.tickets.get(ticketId)!
+    const round = ticket.reviews!.at(-1)!.round
+    const sessionId = reviewerSessionId(ticketId, round)
+    await runtime.reviewers.reviewed(sessionId, verdict ?? reviews.verdict)
+  }
   const runTool = async (sessionId: string, name: string, args: unknown) => {
     const tool = tools.get(sessionId)?.get(name)
     if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
@@ -301,6 +318,6 @@ export async function startRuntime(seed?: (store: Store) => void) {
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
   return { runtime, ctx, directory, agents, tools, deliveries, relays, cards, candidates, evalSession, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
-    jobs, subagents, step, claim }
+    jobs, subagents, step, claim, review, finishReview, reviews }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

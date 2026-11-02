@@ -11,11 +11,12 @@ export function ticketMark(t: T, ticket: TicketStage & Pick<TicketSummary, 'ende
     case 'ended': return { label: valueLabel(t, 'outcome', ticket.ended?.outcome), tone: 'neutral', dot: 'idle', icon: 'stop' }
     case 'person': {
       const action = ticket.action
-      const icon: IconName = action === 'review' ? 'review' : action === 'failed' ? 'alert' : action === 'blocked' ? 'blocked'
-        : action === 'delivery' ? 'inbox' : 'ask'
+      const icon: IconName = action === 'review' || action === 'returned' ? 'review' : action === 'failed' ? 'alert'
+        : action === 'blocked' ? 'blocked' : action === 'delivery' ? 'inbox' : 'ask'
       return { label: t(`stage.${action}`), tone: action === 'failed' ? 'danger' : 'warning', dot: action === 'failed' ? 'error'
         : 'warning', icon }
     }
+    case 'review': return { label: t('stage.running'), tone: 'info', dot: 'ongoing', icon: 'review' }
     case 'working': return ticket.action === 'queued' ? { label: t('stage.queued'), tone: 'neutral', dot: 'idle', icon: 'queue' }
       : { label: t('stage.working'), tone: 'info', dot: 'ongoing', icon: 'running' }
     default: return { label: t('stage.idle'), tone: 'neutral', dot: 'idle', icon: 'clock' }

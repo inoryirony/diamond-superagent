@@ -21,7 +21,7 @@ import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
 import type { ChannelLinks } from '../sources/kind.ts'
-import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { DshExecutor, isReviewerSession, reviewerSessionId, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { evalTitle, followupWhileAssessing, ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
@@ -47,6 +47,8 @@ import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
+import { reviewerTools, type ReviewerToolsHost } from './tools/reviewer.ts'
+import { Reviewers } from './reviewers.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
@@ -67,6 +69,8 @@ export class Runtime extends Service implements SourceHost {
   readonly sessions: Sessions
   readonly settings: Settings
   readonly executor: DshExecutor
+  /** The phase that reviews a ticket's result before the ticket delivers it; its verdict comes through the Engine. */
+  readonly reviewers: Reviewers
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
   readonly engine: Engine
@@ -82,7 +86,7 @@ export class Runtime extends Service implements SourceHost {
   private closingFlag = false
   private stopping?: Promise<void>
   private readonly sourceDeps: SourceContextDeps
-  private readonly toolHost: MainToolsHost & ExecutorToolsHost
+  private readonly toolHost: MainToolsHost & ExecutorToolsHost & ReviewerToolsHost
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
@@ -123,11 +127,12 @@ export class Runtime extends Service implements SourceHost {
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
-        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        tools: (agent, ticket) => !ticket ? mainTools(this.toolHost, agent)
+          : isReviewerSession(agent.id) ? reviewerTools(this.toolHost, ticket.id) : executorTools(this.toolHost, ticket) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
-      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
+      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker', { state: 'ready', detail: 'No review is failing' }), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
@@ -138,9 +143,18 @@ export class Runtime extends Service implements SourceHost {
           await sessions.prompt(evalSessionId(evalId), id, text, 'steer')
         }, candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
+      // A review runs in a Session of its own beside the workers, outside their slots, and hands its verdict to the Engine,
+      // which passes the result on or sends the findings back to the worker; with reviews off, a result is the ticket's.
+      const reviewers = this.reviewers = new Reviewers({ get engine() { return runtime.engine }, store, effects, sessions,
+        closing: () => this.closing(), paused: () => this.paused(), lifetime: this.lifetime, subprocess: ctx.subprocess,
+        environment: ticket => this.ticketEnvironment(ticket), directory: ticket => ticket.execution?.directory ?? machine.stateDir,
+        note: (ticketId, text) => { this.engine.note(ticketId, text) },
+        // The deploy phase needs commands to run; the review alone needs only a Reviewer Session.
+        deploy: () => { const e = store.settings().executor; return e.deploy ? { command: e.deployCommand, e2e: e.e2eCommand } : undefined } })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
+        ...store.settings().executor.reviews ? { reviewer: reviewers } : {},
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
@@ -224,6 +238,7 @@ export class Runtime extends Service implements SourceHost {
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
     this.executor.resume()
+    this.reviewers.resume()
     this.passes.start()
     this.effects.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
@@ -243,8 +258,10 @@ export class Runtime extends Service implements SourceHost {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
       this.assessor.stop()
+      // Every Session dsh-superagent keeps: the main one, the Evals' and Reviews', and each ticket's worker.
       const ids = [this.masterId, ...this.store.threads.active().flatMap(thread => thread.evaluating ? [evalSessionId(thread.evaluating.id)] : []),
-        ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
+        ...this.store.tickets.list().flatMap(ticket => [{ id: workerSessionId(ticket.id) },
+          ...(ticket.reviews ?? []).filter(review => !review.ended).map(review => ({ id: reviewerSessionId(ticket.id, review.round) }))]).map(item => item.id)]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])

@@ -15,6 +15,10 @@ export interface EffectPayloads {
   launch: { ticketId: string; assignmentId: string }
   /** Hand a ticket's waiting Inputs to its running Assignment; the key is the Ticket ID. */
   delivery: { ticketId: string }
+  /** Run a review of a ticket's result in a Session of its own; the key is the ticket ID and round. */
+  review: { ticketId: string; assignmentId: string; round: number }
+  /** End a Reviewer Session's turn after its verdict was recorded; the key is the Session ID. */
+  'review-verdict': { sessionId: string }
   /** Steer a report or a candidate into the main Session; the key is the request ID. */
   relay: { text: string }
   /** Inject a notice into the main Session without waking it; the key names what it reports, such as `prompts`. */

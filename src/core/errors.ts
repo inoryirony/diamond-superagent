@@ -9,6 +9,8 @@ export const USER_ERRORS = {
   unknownPromptPart: ['refused', 'Unknown built-in prompt part {part}'],
   ticketEnded: ['refused', 'Ticket has ended'],
   assignmentEnded: ['refused', 'Assignment has ended; a newer assignment owns this ticket'],
+  noReviewRunning: ['refused', 'This ticket has no review running'],
+  noReviewer: ['refused', 'This installation reviews results only with a Reviewer; none is configured'],
   evalFinished: ['refused', 'Eval {eval} has finished or a later eval replaced it; decide the trigger\'s current eval'],
   notAdmissible: ['refused', 'Trigger is not admissible: {reason}'],
   notExplicit: ['refused', 'An accept through orchestrator_route is for explicit requests from allowed senders; assess proactive candidates with orchestrator_eval and orchestrator_eval_decide'],

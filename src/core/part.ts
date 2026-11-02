@@ -2,7 +2,8 @@
 import { UserError } from './errors.ts'
 import { followupOwners, reached, threadKey } from './model.ts'
 import type { Thread, ThreadRef, Ticket, Trigger } from './model.ts'
-import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, Outbox, Policy, Repositories, SourceScope } from './ports.ts'
+import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, Outbox, Policy, Repositories, ReviewerPort, SourceScope }
+  from './ports.ts'
 
 export interface EngineOptions {
   repo: Repositories
@@ -11,6 +12,8 @@ export interface EngineOptions {
   scope: SourceScope
   assessor: Assessor
   executor: Executor
+  /** Judges a ticket's result before the ticket delivers or ends it; without one, a ready result is the ticket's. */
+  reviewer?: ReviewerPort
   outbox: Outbox
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
   now?: () => string

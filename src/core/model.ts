@@ -305,6 +305,26 @@ export interface Ticket {
   execution?: Execution
   /** The latest failed delivery of an Input to its worker, until a delivery succeeds. */
   delivery?: { error: string; at: string }
+  /**
+   * Reviews of its results, in order. A ready report does not end a ticket whose executor reviews results: it asks for a review
+   * of that result, which passes it towards delivery or returns it to the worker with findings. Only a review that passes the
+   * result, or a worker's `dropped` report, finishes the ticket.
+   */
+  reviews?: TicketReview[]
+}
+
+/** How a review of a ticket's result ended: the work passed it, or it sent the work back with findings. */
+export type ReviewOutcome = 'passed' | 'returned'
+/** What one review of a ticket's result found. */
+export interface TicketReview {
+  /** The Assignment whose result it reviews, the round it is (1 is the first review of the ticket), and when it was asked for. */
+  assignmentId: string
+  round: number
+  at: string
+  /** When it ended, how and why, with what the review found; empty while it runs. */
+  ended?: { at: string; outcome: ReviewOutcome; summary: string; findings?: string[]
+    /** The review could not judge the result, which waits for a person. */
+    unfinished?: true }
 }
 /**
  * A Thread a ticket follows, by its key: `own` when the ticket opened it, such as its own pull request, and when and how it
@@ -319,6 +339,22 @@ export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.en
 /** How a ticket ended. */
 export const ticketOutcome = (ticket: Pick<Ticket, 'ended'>): TicketOutcome | undefined => ticket.ended?.outcome
 export const runningAssignment = (ticket: Ticket): Assignment | undefined => ticket.assignments.find(assignment => assignment.state === 'running')
+/** The review of a ticket's result still running, if any: its newest review without an end. */
+export const pendingReview = (ticket: Pick<Ticket, 'reviews'>): TicketReview | undefined =>
+  ticket.reviews?.findLast(review => !review.ended)
+/**
+ * Whether a ready report of an Assignment asks for a review, or is the result itself: with reviews on, every ready result is
+ * reviewed once, and a returned one again until it runs out of rounds; with reviews off, the result is the ticket's.
+ */
+export const reviewRequired = (ticket: Pick<Ticket, 'reviews' | 'assignments'>, reviews: boolean, rounds: number): boolean => {
+  if (!reviews) return false
+  const report = latestReport(ticket)
+  if (!report) return false
+  const reviewed = (ticket.reviews ?? []).some(review => review.at > report.at)
+  return !reviewed && (ticket.reviews ?? []).length < rounds
+}
+/** The review round a new review of the ticket's latest result is: one more than the reviews it had. */
+export const reviewRound = (ticket: Pick<Ticket, 'reviews'>): number => (ticket.reviews?.length ?? 0) + 1
 /**
  * Whether a Trigger reached a ticket: it started the ticket, came to it as an Input, or is on a Thread the ticket subscribes
  * to; with `context` false, not a Thread the ticket follows only for context, where its worker may read but not write.

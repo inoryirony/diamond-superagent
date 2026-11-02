@@ -7,6 +7,7 @@ import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect,
 import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
+import type { Reviews } from './reviews.ts'
 import { canRetry } from './stage.ts'
 
 const sameChannel = (a: ChannelRef, b: ChannelRef): boolean => JSON.stringify(a) === JSON.stringify(b)
@@ -27,7 +28,10 @@ const STATUS_REQUEST = 'Report the current ticket status with orchestrator_repor
  * Intake, Evals, Assignments, and Engine delegate ticket and subscription mutations here.
  */
 export class Tickets extends EnginePart {
+  private reviews: Reviews | undefined
   constructor(options: EngineOptions, private readonly replies: Replies) { super(options) }
+  /** Connects the part that reviews results, which reads the ticket's reviews to end it; `Engine` creates it after this part. */
+  use(reviews: Reviews): void { this.reviews = reviews }
 
   /**
    * Create the ticket an accept decided, under `mandate`, with the Channels and Threads of the Eval's Triggers, its first
@@ -398,6 +402,40 @@ export class Tickets extends EnginePart {
     const at = this.now()
     this.addInput(ticket, { id: key('input', ticketId, 'note', at, text), kind: 'note', text, at })
     return this.require(ticketId)
+  }
+  /**
+   * Finish a ticket whose result a review passed: end it when its work is done with the Threads it follows, as a ready
+   * report would have at `at`; a ticket still following open Threads stays open and ends when they close.
+   */
+  finishReviewed(ticketId: string, at: string): void {
+    const ticket = this.repo.tickets.get(ticketId)
+    if (!ticket || !liveTicket(ticket)) return
+    const done = !ticket.follows?.length ? { outcome: 'completed' as const, at } : this.followsDone(ticket)
+    if (!done || this.unfinished(ticket, at)) return
+    const resumed = Date.parse(latestAssignment(ticket)?.createdAt ?? '') > Date.parse(at)
+    this.end(ticketId, 'executor', done.outcome, resumed ? this.now() : done.at)
+  }
+  /**
+   * Send a review's findings back to the worker as an Input, on a new Assignment of the same ticket, so it revises the same
+   * work; the ticket then keeps its Assignment's new ready result for the next review.
+   */
+  returned(ticketId: string, report: { summary: string; findings?: string[] }): void {
+    const ticket = this.require(ticketId)
+    const latest = latestAssignment(ticket)
+    if (!latest) throw new UserError('unknownAssignment')
+    this.endAssignment(ticket, latest, 'returned')
+    this.requeueUntaken(ticket, latest)
+    const assignment = this.newAssignment(ticket)
+    const at = this.now()
+    const text = [`The review returned this ticket's result; revise the same work and report ready again.`, report.summary,
+      ...(report.findings?.length ? ['', ...report.findings.map((finding, index) => `${index + 1}. ${finding}`)] : [])].join('\n')
+    const input: TicketInput = { id: key('input', ticket.id, 'review', assignment.id), kind: 'text', text, at }
+    ticket.inputs.push(input); ticket.undelivered.push(input.id); ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+    // The worker's turn ends for the revision, whoever ends it: the next assignment takes the findings as its first input.
+    const stop = this.options.executor.returned ?? this.options.executor.stop
+    stop.call(this.options.executor, ticket, latest, 'returned')
+    this.options.executor.start(ticket, assignment)
   }
   /**
    * Subscribe an open ticket to a Thread its Executor found related, for context: see `Thread.context`.

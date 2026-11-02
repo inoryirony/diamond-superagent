@@ -1,6 +1,6 @@
 /** Ports the core depends on. Sources, policies, assessors, executors, and channels are project-specific. */
-import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, Strength, Thread, Ticket, TicketEndBy, TicketOutcome, Trigger }
-  from './model.ts'
+import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, ReviewOutcome, Strength, Thread, Ticket, TicketEndBy,
+  TicketOutcome, Trigger } from './model.ts'
 import type { Reason } from './reasons.ts'
 
 /** Gate admission result: either inadmissible with a reason code, or admissible with strength and MandateBasis. */
@@ -45,6 +45,18 @@ export type AssessmentOutcome =
     name?: string; note?: string }
   | { kind: 'stop'; ticketId: string; reason: string | Reason; audit?: Record<string, unknown> }
 
+/** What a review found: the work passes or goes back to the worker, with a summary and, when it goes back, the findings it must fix. */
+export interface ReviewReport {
+  outcome: ReviewOutcome
+  summary: string
+  findings?: string[]
+  /**
+   * The result waits for a person instead: the review could not judge it, such as when its Session could not start or gave no
+   * verdict. The ticket then reads `person/review`, and a retry reviews the same result again.
+   */
+  unfinished?: true
+}
+
 /** Semantic judgement. `request` queues the assessment, idempotently per `evalId`; the outcome returns through `Engine.decide`. */
 export interface Assessor {
   request(candidate: Candidate): void
@@ -66,6 +78,32 @@ export interface Executor {
   deliver(ticket: Ticket, assignment: Assignment): void
   /** End an assignment's work, such as cancelling its Session's turn; called after the ticket or assignment has already ended in the domain. */
   stop(ticket: Ticket, assignment: Assignment, reason: string): void
+  /** End an assignment as `returned`: a review sent its result back, and the worker takes it up again in a new assignment. */
+  returned?(ticket: Ticket, assignment: Assignment, reason: string): void
+  /**
+   * Whether results are reviewed before a ticket delivers or ends them; a ready report then asks for a review rather than
+   * being the ticket's result (see `Ticket.reviews`).
+   */
+  reviews?(): boolean
+}
+
+/** What a review asks of an Executor: which ticket, the result it reviews, and the round it is. */
+export interface ReviewRequest {
+  ticketId: string
+  /** The Assignment whose ready result the review judges; a review of a ticket without a result judges its last assignment. */
+  assignmentId: string
+  round: number
+}
+
+/**
+ * Judges a ticket's result in a Session of its own, with code and the original request; the Engine queues it inside its
+ * commands and it reports back through `Engine.reviewEnded`.
+ */
+export interface ReviewerPort {
+  /** Queue a review; reports back through `Engine.reviewEnded`, an `unfinished` verdict when it cannot run or give one. */
+  review(request: ReviewRequest): void
+  /** End the review running on `ticket`; called after the ticket ended or a person restarted its worker. */
+  stopReview(ticket: Ticket, reason: string): void
 }
 
 /** A message for a Channel; `ticketId` names the Ticket it is for, when there is one. */
@@ -92,6 +130,8 @@ export interface DomainEvents {
   'ticket.ended': { ticketId: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
   'assignment.started': { ticketId: string; assignmentId: string }
   'assignment.ended': { ticketId: string; assignmentId: string; reason: string }
+  /** A ticket's result went to review: the round, and the Assignment whose result it judges. */
+  'ticket.reviewing': { ticketId: string; round: number; assignmentId: string }
   'thread.subscribed': { threadKey: string; ticketId: string }
   /** A person dropped every ticket's Subscription, or a ticket's Executor its own, for `reason`. */
   'thread.unsubscribed': { threadKey: string; ticketId: string; by: 'person' | 'executor'; reason?: string }

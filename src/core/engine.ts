@@ -2,12 +2,13 @@
 import { UserError } from './errors.ts'
 import { isoTime, liveTicket } from './model.ts'
 import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, Trigger } from './model.ts'
-import type { Candidate, Repositories } from './ports.ts'
+import type { Candidate, Repositories, ReviewReport, ReviewerPort } from './ports.ts'
 import type { EngineOptions } from './part.ts'
 import { Assignments, type WorkerReport } from './assignments.ts'
 import { Evals, type Outcome } from './evals.ts'
 import { Intake, type ReceiveResult } from './intake.ts'
 import { Replies, type Reply, type ReplyRequest } from './replies.ts'
+import { Reviews } from './reviews.ts'
 import { Tickets } from './tickets.ts'
 
 export type { EngineOptions } from './part.ts'
@@ -28,11 +29,15 @@ export class Engine {
   private readonly assignments: Assignments
   private readonly evals: Evals
   private readonly intake: Intake
+  private readonly reviews: Reviews
   constructor(private readonly options: EngineOptions) {
     this.repo = options.repo
     this.replies = new Replies(options)
     this.tickets = new Tickets(options, this.replies)
     this.assignments = new Assignments(options, this.tickets, this.replies)
+    this.reviews = new Reviews(options, options.reviewer ?? ABSENT_REVIEWER, this.tickets)
+    this.tickets.use(this.reviews)
+    this.assignments.use(this.reviews)
     this.evals = new Evals(options, this.tickets)
     this.intake = new Intake(options, this.tickets)
   }
@@ -246,6 +251,16 @@ export class Engine {
     this.repo.atomic(() => { this.assignments.interrupted(ticketId, assignmentId) })
   }
 
+  // Reviews
+
+  /**
+   * The Reviewer's verdict on the result under review: a pass delivers the result as the worker's ready report would have and
+   * ends the ticket when its work is done; a return sends the findings back to the worker, which revises the same work, until
+   * the rounds are spent and the result waits for a person.
+   * @throws UserError when the ticket is unknown or ended, or has no review running.
+   */
+  reviewEnded(ticketId: string, report: ReviewReport): Ticket { return this.repo.atomic(() => this.reviews.end(ticketId, report)) }
+
   // Settings
 
   /**
@@ -265,6 +280,14 @@ export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivere
 export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
 /** What Settings tells the Engine. */
 export type EngineForSettings = Pick<Engine, 'policyChanged'>
+/**
+ * What the Reviewer tells the Engine, and what it reads: the ticket it reviews and every ticket of its thread, so a result
+ * never judged twice reads what it needs through `orchestrator_read`.
+ */
+export type EngineForReviewer = Pick<Engine, 'reviewEnded'>
 /** What the Executor tells the Engine, and what its workers ask of it. */
 export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed'
   | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply'>
+
+/** The Reviewer the Engine runs with when its host has none, which never reviews: results are the ticket's, as without reviews. */
+const ABSENT_REVIEWER: ReviewerPort = { review: () => { throw new UserError('noReviewer') }, stopReview: () => {} }
