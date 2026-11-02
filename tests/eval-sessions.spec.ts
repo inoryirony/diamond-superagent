@@ -2,7 +2,7 @@
 import { afterEach, expect, it } from 'vitest'
 import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
 import { evalOfSession, evalSessionId, isOrchestratorSession } from '../src/app/sessions.ts'
-import { ENDED_TICKET_CARDS, OPEN_TICKET_CARDS } from '../src/app/cards.ts'
+import { ENDED_TICKET_CARD_DAYS, ENDED_TICKET_CARDS, OPEN_TICKET_CARDS, relatedTickets } from '../src/app/cards.ts'
 
 let h: Host | undefined
 afterEach(async () => { await h?.stop(); h = undefined })
@@ -64,6 +64,11 @@ it('shows a candidate every open ticket, newest first, and only its own thread\'
   expect((own.related_tickets as { ticket_id: string }[]).map(item => item.ticket_id)).toEqual([b.ticket.id, a.ticket.id, c.ticket.id])
   expect(own.tickets_total).toBe(3)
   expect(OPEN_TICKET_CARDS).toBeGreaterThan(ENDED_TICKET_CARDS)
+  // An ended ticket leaves the card after ENDED_TICKET_CARD_DAYS; the ticket list still has it.
+  const tickets = [a, b, c].map(item => h!.runtime.store.tickets.get(item.ticket.id)!)
+  const later = new Date(Date.parse(c.ticket.createdAt) + (ENDED_TICKET_CARD_DAYS + 1) * 86_400_000)
+  expect(relatedTickets(tickets, later).related_tickets.map(item => item.ticket_id)).toEqual([b.ticket.id, a.ticket.id])
+  expect(relatedTickets(tickets, later).tickets_total).toBe(3)
 })
 
 it('steers a message that arrives on a thread under assessment into that Eval\'s Session, where it may be routed at once', async () => {

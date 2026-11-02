@@ -541,7 +541,7 @@ Settings and prompt saves return the saved configuration. Policy sync returns th
 `orchestrator_eval` returns context rather than instructions. Assessment instructions live in `runtime/admission` (`prompts/admission.md`), and rules in `runtime/policy`. Its context includes:
 
 - The Trigger text, up to 4,000 characters, with image ids and other Triggers in the batch.
-- `related_tickets`: every open Ticket, newest first, up to `OPEN_TICKET_CARDS` (60), then up to `ENDED_TICKET_CARDS` (8) ended ones of the Thread, and `tickets_total`.
+- `related_tickets`: every open Ticket, newest first, up to `OPEN_TICKET_CARDS` (60), then up to `ENDED_TICKET_CARDS` (8) ended ones of the Thread that ended within `ENDED_TICKET_CARD_DAYS` (7), and `tickets_total`. Older ended Tickets are archived from the card and remain in the `tickets` resource.
 - The Eval's `policy_version`.
 - A Thread window: the first five messages and five on either side of the Trigger. Messages use `{id, from, at, text}`, normally limited to 400 characters, or 1,200 for the two on either side. Truncated messages include `chars`; image references use `images`.
 - Other loaded messages as `{id, from, preview}` stubs of 50 characters. `orchestrator_eval_read` expands them by id.

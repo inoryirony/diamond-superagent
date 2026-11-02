@@ -94,14 +94,17 @@ export function textPage(resource: string, text: string, offset: number, limit: 
 export const OPEN_TICKET_CARDS = 60
 /** How many ended tickets of the candidate's thread a card carries at most. */
 export const ENDED_TICKET_CARDS = 8
+/** How long an ended ticket stays on candidate cards; older ones are archived from the card, and `orchestrator_read` tickets still lists them. */
+export const ENDED_TICKET_CARD_DAYS = 7
 /**
- * The tickets a candidate card lists: every live ticket, newest first, then the ended ones of the thread; `tickets_total`
- * tells when the limits cut some off, which `orchestrator_read` tickets pages through.
+ * The tickets a candidate card lists: every live ticket, newest first, then the ended ones of the thread that ended within
+ * `ENDED_TICKET_CARD_DAYS`; `tickets_total` tells when the limits cut some off, which `orchestrator_read` tickets pages through.
  */
-export function relatedTickets(tickets: readonly Ticket[]) {
+export function relatedTickets(tickets: readonly Ticket[], now = new Date()) {
   const newest = (a: Ticket, b: Ticket) => b.createdAt.localeCompare(a.createdAt)
+  const archived = new Date(now.getTime() - ENDED_TICKET_CARD_DAYS * 86_400_000).toISOString()
   const open = tickets.filter(ticket => !ticket.ended).sort(newest).slice(0, OPEN_TICKET_CARDS)
-  const ended = tickets.filter(ticket => ticket.ended).sort(newest).slice(0, ENDED_TICKET_CARDS)
+  const ended = tickets.filter(ticket => ticket.ended && ticket.ended.at > archived).sort(newest).slice(0, ENDED_TICKET_CARDS)
   return { related_tickets: [...open, ...ended].map(ticketCard), tickets_total: tickets.length }
 }
 /** The card an Eval's Session gets when another message arrives on the Thread it assesses. */
