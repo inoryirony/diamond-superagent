@@ -380,6 +380,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/jira-channel.ts` | The Jira Channel: a comment on the Issue, `sent` or `gone`, scanned for its own marker before it posts |
 | `src/sources/jira-read.ts` | The `jira/` reads of an Issue and its comments, and `jiraThreadContext` |
 | `src/sources/jira-text.ts` | Markdown to Jira wiki markup (`toWiki`) and the hidden marker (`jiraMarker`, `hasMarker`) that makes a comment idempotent |
+| `src/sources/gitlab.ts` | The GitLab kind and plugin entry, exported as `./gitlab-watch`: the agent's merge requests in a group, polled for the Tickets that follow them. It has no Policy, Channel or Trigger |
+| `src/sources/gitlab-mr.ts` | The merge request rules: which Ticket follows an MR (`observeMr`), the closes it reports to the Engine, and `mrEndNotices`, the notice of a Ticket that ended merged or closed |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
@@ -403,7 +405,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts`, `src/sources/feishu.ts` and `src/sources/jira.ts` are also the entries of the three Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./feishu-watch` and `./jira-watch`. The bundle's `cordis.patch.yml` inserts the four plugins, with Feishu and Jira disabled.
+`src/sources/github.ts`, `src/sources/feishu.ts`, `src/sources/jira.ts` and `src/sources/gitlab.ts` are also the entries of the four Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./feishu-watch`, `./jira-watch` and `./gitlab-watch`. The bundle's `cordis.patch.yml` inserts the five plugins, with Feishu, Jira and GitLab disabled.
 
 ## Tests
 
@@ -415,6 +417,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
 | `tests/jira.spec.ts` | The Jira Source on a `SourceContext`: Issues and comments as Triggers, assignment and mentions, poll deduplication, the close of a done Issue, the Channel's marker and `gone`, `toWiki` |
+| `tests/gitlab.spec.ts` | The GitLab Source on a `SourceContext`: an MR claimed by the branch of its Ticket, the close it reports, its terminal notice, and the authors and branches it ignores |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
