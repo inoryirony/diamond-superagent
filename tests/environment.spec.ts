@@ -114,6 +114,22 @@ describe('agent git configuration', () => {
   })
 })
 
+it('selects the GitLab account credentials for its own instance, so a worker can push a merge-request branch', async () => {
+  const home = join(dir, 'home'); mkdirSync(home)
+  const glab = program(join(dir, 'glab-agent'), 'echo glab')
+  const deployment = testDeployment({ stateDir: dir, github: undefined,
+    gitlab: { cli: glab, host: 'git.example.com', group: 'acme/widgets', username: 'agent' } })
+  await writeEnvironment(deployment, [])
+  const env = workerEnv({ PATH: process.env.PATH, HOME: home, ...agentVariables(dir) })
+  const git = async (...args: string[]): Promise<string> => (await exec('git', args, { cwd: dir, env })).stdout.trim()
+  await git('init', '-q', 'repo')
+  await exec('git', ['-C', 'repo', 'remote', 'add', 'origin', 'git@git.example.com:acme/widgets.git'], { cwd: dir, env })
+  expect(await git('-C', 'repo', 'remote', 'get-url', '--push', 'origin')).toBe('https://git.example.com/acme/widgets.git')
+  expect(await git('config', '--show-origin', '--get-all', 'credential.https://git.example.com.helper')).toBe(`file:${workerGitConfig(dir)}\t${credentialHelper(glab)}`)
+  // With no GitHub account no github.com helper is written, and git exits 1 when the key is absent.
+  await expect(git('config', '--get-all', 'credential.https://github.com.helper')).rejects.toThrow()
+})
+
 it('fails instead of asking the operator\'s askpass helpers when the agent\'s credential helper has no answer', async () => {
   const log = join(dir, 'asked')
   const askpass = program(join(dir, 'askpass'), `echo asked >> ${log}; echo operator-secret`)

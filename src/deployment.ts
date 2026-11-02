@@ -61,8 +61,8 @@ export interface GithubAccount { cli: string; login: string; noreply: string; re
 export interface Deployment extends Machine { github?: GithubAccount; feishu?: FeishuBot; dingtalk?: DingtalkAccount; jira?: JiraAccount; gitlab?: GitlabAccount }
 /** The Jira account a Personal Access Token (read from the environment variable `patEnv`, never stored) acts as. */
 export interface JiraAccount { baseUrl: string; patEnv: string; name: string; displayName: string }
-/** The signed-in GitLab account `glab` acts as, and the group whose merge requests the GitLab Source follows. */
-export interface GitlabAccount { cli: string; group: string; username: string }
+/** The signed-in GitLab account `glab` acts as, the instance it is signed in to, and the group whose merge requests the Source follows. */
+export interface GitlabAccount { cli: string; host: string; group: string; username: string }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
 /** The signed-in DingTalk account `dws` acts as; `openDingtalkId` is the operator-entered ID that tells the account's own messages apart. */
 export interface DingtalkAccount { cli: string; openDingtalkId: string; userId: string; name: string; corpId: string }
@@ -166,8 +166,14 @@ export async function resolveDingtalk(machine: Machine, dingtalk: unknown, probe
 const JiraSelf = z.looseObject({ name: z.string().min(1), displayName: z.string().default('') })
 /** Reads a Jira URL with a Bearer token and returns its body; a status outside 2xx throws. */
 export type JiraProbe = (url: string, token: string) => Promise<string>
+/**
+ * The `Authorization` header for a Jira token. A Personal Access Token goes as a Bearer token; a value written as
+ * `user:password` (Jira Server's basic authentication, which some installations still use) goes as Basic.
+ */
+export const jiraAuthorization = (token: string): string =>
+  token.includes(':') ? `Basic ${Buffer.from(token).toString('base64')}` : `Bearer ${token}`
 export const jiraProbe: JiraProbe = async (url, token) => {
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) })
+  const response = await fetch(url, { headers: { Authorization: jiraAuthorization(token), Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) })
   if (!response.ok) throw new Error(`Jira answered HTTP ${response.status}`)
   return response.text()
 }
@@ -201,5 +207,7 @@ export async function resolveGitlab(machine: Machine, gitlab: unknown, probe: Pr
   const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('gitlabSignedOut', { output: reason(error) }) })
   const me = parsed(GitlabUser, text)
   if (!me) throw new SetupError('gitlabSignedOut')
-  return { cli, group: account.group.replace(/^[/]+|[/]+$/g, ''), username: me.username }
+  const host = (await probe([cli, 'config', 'get', 'host']).catch(() => '')).trim()
+  if (!host) throw new SetupError('gitlabSignedOut')
+  return { cli, host, group: account.group.replace(/^[/]+|[/]+$/g, ''), username: me.username }
 }

@@ -99,8 +99,12 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
   await shim('gh', github ? run(github.cli) : fail('gh is unavailable: this installation has no GitHub account.'))
   await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
-  // A worker may read DingTalk through `dws`, but never sends: replies leave through the DingTalk Source's channel.
-  const dws = (program: string): string => `${withoutShims}\ncase "$*" in 'chat message send'*) echo 'dws chat message send is blocked: the DingTalk Source sends replies.' >&2; exit 1;; esac\nexec ${shellQuote(program)} "$@"`
+  // A worker may read DingTalk through `dws`, but never writes into a conversation: replies and their cards leave through the
+  // DingTalk Source's channel, whose records and idempotency keys are the only ones the Engine follows.
+  const dws = (program: string): string => `${withoutShims}\ncase "$*" in
+  'chat message send'*|'chat message send-card'*|'chat message update-card'*|'chat message add-emoji'*|'chat message remove-emoji'*|'chat +dm'*|'chat +broadcast'*)
+    echo 'dws writes to a conversation only through the DingTalk Source.' >&2; exit 1;;
+esac\nexec ${shellQuote(program)} "$@"`
   await shim('dws', dingtalk ? dws(dingtalk.cli) : fail('dws is unavailable: this installation has no DingTalk account.'))
   await shim('glab', gitlab ? run(gitlab.cli) : fail('glab is unavailable: this installation has no GitLab account.'))
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
@@ -115,6 +119,9 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
     // With no GitHub account there is no github.com credential to select and no address to rewrite.
     ...github ? ['[credential "https://github.com"]', `\thelper = ${gitQuote(credentialHelper(github.cli))}`,
       '[url "https://github.com/"]', '\tinsteadOf = git@github.com:', '\tinsteadOf = ssh://git@github.com/'] : [],
+    // GitLab likewise: a worker pushes with the credentials `glab` already holds for its instance, never the operator's own.
+    ...gitlab ? [`[credential "https://${gitlab.host}"]`, `\thelper = ${gitQuote(credentialHelper(gitlab.cli))}`,
+      `[url "https://${gitlab.host}/"]`, `\tinsteadOf = git@${gitlab.host}:`, `\tinsteadOf = ssh://git@${gitlab.host}/`] : [],
     // Include Git LFS filters because the operator's global gitconfig (which usually holds them) is ignored.
     '[filter "lfs"]', '\tclean = git-lfs clean -- %f', '\tsmudge = git-lfs smudge -- %f', '\tprocess = git-lfs filter-process', '\trequired = true',
   ].join('\n') + '\n')
@@ -140,13 +147,16 @@ export async function runAsWorker(subprocess: SubprocessRuntime, argv: string[],
 }
 
 /** Verifies that worker git invocations resolve the deployment's GitHub credential helper. */
-export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'stateDir'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
-  const { github, stateDir } = deployment
-  // Without a GitHub account no github.com credential helper is written, so there is none to verify.
-  if (!github) return
+export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'gitlab' | 'stateDir'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
+  const { github, gitlab, stateDir } = deployment
   // `-z` separates fields with NUL and never quotes paths.
-  const helpers = (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all', 'credential.https://github.com.helper'], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch(() => '')).split('\0')
-  if (helpers.join('\0') !== [`file:${workerGitConfig(stateDir)}`, credentialHelper(github.cli), ''].join('\0')) throw new SetupError('gitTooOld')
+  const helpersOf = async (host: string): Promise<string[]> => (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all', `credential.https://${host}.helper`], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch(() => '')).split('\0')
+  const verifies = async (host: string, cli: string): Promise<void> => {
+    if ((await helpersOf(host)).join('\0') !== [`file:${workerGitConfig(stateDir)}`, credentialHelper(cli), ''].join('\0')) throw new SetupError('gitTooOld')
+  }
+  // Without a GitHub account no github.com credential helper is written, so there is none to verify; the same holds for GitLab.
+  if (github) await verifies('github.com', github.cli)
+  if (gitlab) await verifies(gitlab.host, gitlab.cli)
 }
 
 /**

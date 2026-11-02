@@ -16,7 +16,6 @@
     # Optional Jira Source; requires a Personal Access Token in an environment variable and the base URL after enabling.
     - id: dsh-superagent-jira
       name: dsh-superagent/jira-watch
-      disabled: true
     # Optional GitLab Source; follows the agent's merge requests only, so it needs no Policy and sends nothing.
     - id: dsh-superagent-gitlab
       name: dsh-superagent/gitlab-watch

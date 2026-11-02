@@ -18,7 +18,7 @@ import { SourceRegistry } from '../../src/sources/registry.ts'
 import { testDeployment } from './deployment.ts'
 
 const JIRA = { baseUrl: 'https://issue.example.com', patEnv: 'JIRA_PAT', name: 'agent', displayName: 'Agent' }
-const GITLAB = { cli: '/bin/false', group: 'xk/product/zk-ai', username: 'agent' }
+const GITLAB = { cli: '/bin/false', host: 'git.example.com', group: 'xk/product/zk-ai', username: 'agent' }
 
 export function sourceHost(overrides: Partial<SourceContextDeps> = {}) {
   const store = new Store(join(mkdtempSync(join(tmpdir(), 'jira-')), 'db.sqlite'))

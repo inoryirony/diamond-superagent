@@ -4,6 +4,7 @@ import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { Deployment, GithubAccount, JiraAccount } from '../deployment.ts'
+import { jiraAuthorization } from '../deployment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -151,7 +152,7 @@ export class Commands {
       try {
         const response = await fetch(url, {
           method: init.method ?? 'GET',
-          headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...init.body === undefined ? {} : { 'Content-Type': 'application/json' } },
+          headers: { Authorization: jiraAuthorization(token), Accept: 'application/json', ...init.body === undefined ? {} : { 'Content-Type': 'application/json' } },
           ...init.body === undefined ? {} : { body: JSON.stringify(init.body) },
           signal: this.signal,
         })
