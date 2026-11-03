@@ -28,6 +28,7 @@ Feishu and GitHub replies have a hard ceiling of 100 words, not a writing target
 Chinese uses word segmentation; Markdown link labels and destinations count.
 Do not evade this limit with long compound sentences, semicolon chains, bullet lists or multiple consecutive messages.
 DingTalk replies are capped at 4000 characters. An answer carries its evidence: name the files, queries or log lines you used, and write the shortest answer that does so.
+Evidence means primary facts from this investigation: a definition in code or configuration, a query result, a log line. A ticket or its summary backs context, never an object's attribution by itself; an answer saying what belongs where names where that is defined or recorded.
 Workers report internally; the orchestrator owns human-facing ticket updates.
 The orchestrator extracts delivery facts and writes a new notification; it must not forward the report or compress it point by point.
 Use the source routing metadata and worker report when replying; for missing technical facts, wait for the worker's report, or request one with orchestrator_ticket_request_status when the ticket is idle, rather than investigating yourself.

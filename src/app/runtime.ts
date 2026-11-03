@@ -40,6 +40,8 @@ import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
+import { dingtalkSettings } from '../sources/dingtalk.ts'
+import { resolveNames } from '../sources/dingtalk-names.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
 import { Sessions, evalSessionId } from './sessions.ts'
 import { Settings } from './settings.ts'
@@ -107,7 +109,9 @@ export class Runtime extends Service implements SourceHost {
       const feishu = () => setup.configured() && !!setup.deployment.feishu
       const github = () => setup.configured() && !!setup.deployment.github
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu, github)
-      const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
+      // The main Session's ID carries the directory it works in, so changing the configured workspace starts a Session in the
+      // new directory rather than reusing one pinned to the old: DSH fixes a Session's workspace when it is created.
+      const masterId = this.masterId = `orchestrator-${key(this.masterWorkspace())}`
       store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
@@ -124,6 +128,7 @@ export class Runtime extends Service implements SourceHost {
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link,
+        dingtalkNames: nicks => resolveNames(commands, store, dingtalkSettings(sources).openDingtalkId, nicks),
         threadContext: trigger => sources.threadContext(trigger) }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
@@ -140,7 +145,7 @@ export class Runtime extends Service implements SourceHost {
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         // Each Eval is assessed in its own orchestrator Session, created on first delivery and kept afterwards for people to read.
         deliver: async (evalId, id, text) => {
-          await sessions.ensure(evalSessionId(evalId), machine.stateDir, evalTitle(store, evalId), 'orchestrator')
+          await sessions.ensure(evalSessionId(evalId), this.masterWorkspace(), evalTitle(store, evalId), 'orchestrator')
           await sessions.prompt(evalSessionId(evalId), id, text, 'steer')
         }, candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
@@ -233,6 +238,12 @@ export class Runtime extends Service implements SourceHost {
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
   private closing(): boolean { return this.closingFlag }
+  /**
+   * The directory the main Session works in: the configured workspace, else the state directory. A question about a named tool,
+   * service or repository is answered by reading it, which needs the directories that hold them — the state directory holds none.
+   * Read live, so a changed workspace applies to the next Session created.
+   */
+  private masterWorkspace(): string { return this.store.settings().executor.workspace || this.machine.stateDir }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
   private paused(): boolean { return !this.setup.configured() || this.store.settings().paused }
   private async initialize(): Promise<void> {
@@ -244,7 +255,7 @@ export class Runtime extends Service implements SourceHost {
     }
     this.sessions.install()
     this.executor.install()
-    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    await this.sessions.ensure(this.masterId, this.masterWorkspace(), 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return

@@ -92,6 +92,11 @@ export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
+  /**
+   * The workspace the main Session works in: the directory holding the repositories an answer may need to read. Empty keeps the
+   * state directory, which holds no repository, so an answer that must locate a named tool or service in code cannot find it.
+   */
+  workspace: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
   /**

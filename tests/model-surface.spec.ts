@@ -37,7 +37,7 @@ interface Skill { name: string; description: string; content: string }
  * Maximum combined character count of system prompt and tool definitions per role (~5% above baseline).
  * Lower this limit when shrinking model-facing text; raise it only intentionally and explain why in the commit message.
  */
-const BUDGET: Record<Role, number> = { orchestrator: 61_800, worker: 44_900 } // worker +500: the evidence rule's prompt lines and the report's evidence schema
+const BUDGET: Record<Role, number> = { orchestrator: 61_500, worker: 45_400 } // orchestrator +4500: the two hold tools, their option schemas, and the lane fields a card carries; worker unchanged
 const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
 const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
 const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'

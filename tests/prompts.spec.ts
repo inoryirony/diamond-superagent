@@ -45,10 +45,12 @@ it('saves team sections and skills as versions that survive a restart, with hist
 })
 
 it('assembles every role from fixed sections around the team sections, whatever the configuration says', () => {
-  const config = { communication: 'Say little.', scope: '', delivery: 'Attach screenshots.', skills: {} }
+  const config = { communication: 'Say little.', scope: 'Stay small.', delivery: 'Attach screenshots.', skills: {} }
   for (const role of ['orchestrator', 'worker'] as const) {
     const names = promptParts(config, role, 'env').map(part => part.name)
-    expect(names).toEqual(['runtime/shared', `runtime/${role}`, 'communication', 'delivery', 'runtime/subscriptions', 'runtime/replies', role === 'orchestrator' ? 'runtime/dispatch' : 'runtime/work', ...role === 'orchestrator' ? ['runtime/admission'] : [], 'runtime/handoff', 'runtime/environment'])
+    // Team sections describe work a Session does itself: the worker gets all three, the main Session only Communication.
+    const team = role === 'worker' ? ['communication', 'scope', 'delivery'] : ['communication']
+    expect(names).toEqual(['runtime/shared', `runtime/${role}`, ...team, 'runtime/subscriptions', 'runtime/replies', role === 'orchestrator' ? 'runtime/dispatch' : 'runtime/work', ...role === 'orchestrator' ? ['runtime/admission'] : [], 'runtime/handoff', 'runtime/environment'])
     const prompt = composePrompt(config, role)
     for (const fixed of [sharedPrompt, role === 'orchestrator' ? masterPrompt : workerPrompt, guides.subscriptions!, guides.replies!, handoffPolicy(role)]) expect(prompt).toContain(fixed)
     expect(prompt.endsWith(handoffPolicy(role))).toBe(true)

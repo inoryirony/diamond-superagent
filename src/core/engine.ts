@@ -1,6 +1,6 @@
 /** The domain Engine: the single entry point of the core, and the role interfaces its callers receive. */
 import { UserError } from './errors.ts'
-import { isoTime, liveTicket, runningAssignment } from './model.ts'
+import { isoTime, latestAssignment, liveTicket, runningAssignment } from './model.ts'
 import type { ChannelRef, Decision, PolicyEffect, ReportEntry, ThreadRef, Ticket, Trigger } from './model.ts'
 import type { Candidate, Repositories, ReviewReport, ReviewerPort } from './ports.ts'
 import type { EngineOptions } from './part.ts'
@@ -91,6 +91,10 @@ export class Engine {
     const now = this.options.now?.() ?? new Date().toISOString()
     for (const ticket of this.repo.tickets.active()) {
       if (liveTicket(ticket) && runningAssignment(ticket)) this.repo.atomic(() => { this.tickets.stall(ticket.id, now) })
+    }
+    // A hold nobody settled by its due time is asked about again, so a wait on people cannot turn into a quiet stop.
+    for (const ticket of this.repo.tickets.open()) {
+      if (ticket.hold && !ticket.hold.released && ticket.hold.dueAt && ticket.hold.dueAt <= now) this.repo.atomic(() => { this.tickets.holdDue(ticket.id, now) })
     }
   }
 
@@ -238,6 +242,33 @@ export class Engine {
    */
   note(ticketId: string, text: string): Ticket { return this.repo.atomic(() => this.tickets.note(ticketId, text)) }
   /**
+   * Park the inputs a conflict is about until someone settles which direction stands: see `Tickets.hold`. The rest of the
+   * ticket keeps working.
+   * @throws UserError when the ticket is unknown or ended.
+   */
+  hold(ticketId: string, hold: Parameters<Tickets['hold']>[1]): Ticket {
+    return this.repo.atomic(() => this.tickets.hold(ticketId, hold))
+  }
+  /**
+   * Settle a held ticket with the direction that stands, delivered ahead of what waited: see `Tickets.release`. Wakes a
+   * worker whose turn ended, so it takes the settlement up.
+   * @throws UserError when the ticket is unknown or not held.
+   */
+  release(ticketId: string, resolution: string, by: 'person' | 'orchestrator', option?: string, triggerId?: string): Ticket {
+    return this.repo.atomic(() => {
+      const ticket = this.tickets.release(ticketId, resolution, by, option, triggerId)
+      if (!runningAssignment(ticket) && latestAssignment(ticket)?.state === 'ended') this.tickets.wake(ticketId)
+      return this.repo.tickets.get(ticketId)!
+    })
+  }
+  /** The board's newest change: a lane reads it with the candidate, and holds its decisions to it (`see changedSince`). */
+  boardSeq(): number { return this.repo.tickets.boardSeq() }
+  /**
+   * The open tickets that changed after `since`: a lane that assessed at `since` reads them before accepting new work, so two
+   * lanes never open the same ticket twice.
+   */
+  changedSince(since: number): Ticket[] { return this.repo.tickets.changedSince(since).map(item => item.ticket) }
+  /**
    * An Executor's hand-back of a message that reached its ticket but asks for more than it: see `Evals.handback`.
    * @returns whether it was queued for Eval: false while another ticket still decides it, and for one this ticket did not decide (see `Evals.handback`).
    * @throws UserError when the ticket or trigger is unknown, the trigger did not reach the ticket, or the ticket already handed it back.
@@ -290,7 +321,8 @@ export class Engine {
 /** What Sources ask and tell the Engine. */
 export type EngineForSources = Pick<Engine, 'receive' | 'bindThread' | 'threadClosed'>
 /** What the main Session asks of the Engine. */
-export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'>
+export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'
+  | 'hold' | 'release' | 'changedSince' | 'boardSeq'>
 /** What people ask of the Engine, through the panel or the main Session. */
 export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'restartTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
 /** What Settings tells the Engine. */

@@ -20,7 +20,9 @@ export function family<V, A extends unknown[] = [string]>(prefix: string, format
 
 export const KV = {
   /** Store: current database schema version. */
-  store: { schema: record<number>('schema') },
+  store: { schema: record<number>('schema'),
+    /** The board's newest change: each ticket save takes the next one, so a lane can tell what changed since its snapshot. */
+    board: record<number>('board-seq') },
   /** Settings: current revision, per-block revision, and saved settings snapshots (including the current one). */
   settings: { revision: record<number>('settings-revision'),
     block: family<number, [block: SettingsSave]>('settings-block-revision:'),
@@ -66,6 +68,8 @@ export const KV = {
     roots: family<Record<string, string>, [conversation: string]>('dingtalk-roots:'),
     episodes: family<{ rootId: string; lastAt: number }, [conversation: string]>('dingtalk-episodes:'),
     reactions: family<{ messageId: string; at: number }[], [conversation: string]>('dingtalk-reactions:'),
+    /** Directory contacts by the nick a message shows, as `dws contact user search` resolved them; `null` marks a nick that resolved to nobody. */
+    names: family<import('./sources/dingtalk-names.ts').ContactRecord, [nick: string]>('dingtalk-names:'),
     /** The card an acknowledgement opened, with its text, waiting for the reply that finishes it. */
     cards: record<Record<string, { bizId: string; text: string; at: number }>>('dingtalk-cards') },
   /**

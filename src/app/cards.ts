@@ -7,15 +7,18 @@ import { batchLine, inputResource } from '../executor/dsh.ts'
 /** Collapses whitespace and truncates text for display previews while keeping code, angle brackets, and links intact for model readers. */
 export function preview(text: string): string { return text.replace(/\s+/g, ' ').slice(0, 160) }
 export function triggerCard(trigger: Trigger, disposition?: TriggerDisposition) {
-  return { trigger_id: trigger.id, source: trigger.source, ...(trigger.url ? { source_url: trigger.url } : {}), actor: trigger.actor.id, thread: threadKey(trigger.threads[0]!), human: trigger.human, at: trigger.at,
+  return { trigger_id: trigger.id, source: trigger.source, ...(trigger.url ? { source_url: trigger.url } : {}), actor: trigger.actor.id,
+    ...(typeof trigger.meta.actor_name === 'string' ? { actor_name: trigger.meta.actor_name } : {}),
+    ...(trigger.meta.operator === true ? { operator: true } : {}),
+    thread: threadKey(trigger.threads[0]!), human: trigger.human, at: trigger.at,
     preview: preview(trigger.text), chars: trigger.text.length, read: `trigger/${trigger.id}`,
     ...(disposition ? { disposition: { ...(disposition.filtered ? { filtered: reasonText(disposition.filtered) } : {}),
       ...(disposition.decisionId ? { decision_id: disposition.decisionId } : {}),
       delivered_to: disposition.fanout } } : {}) }
 }
 /** The states a ticket card shows: an open ticket's stage (docs/003), and an ended ticket's outcome. */
-export const TICKET_STATES = ['person/delivery', 'person/answer', 'person/review', 'person/returned', 'person/blocked', 'person/failed', 'review/running',
-  'working', 'working/queued', 'idle', 'completed', 'merged', 'closed', 'dropped', 'stopped'] as const
+export const TICKET_STATES = ['person/delivery', 'person/answer', 'person/review', 'person/returned', 'person/blocked', 'person/failed', 'person/held',
+  'review/running', 'working', 'working/queued', 'idle', 'completed', 'merged', 'closed', 'dropped', 'stopped'] as const
 export type TicketCardState = typeof TICKET_STATES[number]
 function cardState(ticket: Ticket): TicketCardState {
   if (ticket.ended) return ticket.ended.outcome
@@ -27,9 +30,10 @@ function cardState(ticket: Ticket): TicketCardState {
 }
 export function ticketCard(ticket: Ticket) {
   const ended = ticket.ended && { at: ticket.ended.at, by: ticket.ended.by, reason: ticket.ended.reason ?? ticket.ended.outcome }
-  const { attention } = ticket
+  const { attention, hold } = ticket
   return { ticket_id: ticket.id, title: ticket.title, state: cardState(ticket), strength: ticket.mandate.strength,
     ...(pullOf(ticket) ? { pr_number: pullOf(ticket) } : {}), ...(ended ? { ended } : {}),
+    ...(hold && !hold.released ? { hold: { question: hold.question, ...hold.triggerId ? { trigger_id: hold.triggerId } : {}, at: hold.at } } : {}),
     ...(attention ? { attention: { question: attention.question, ...attention.triggerId ? { trigger_id: attention.triggerId } : {} } } : {}),
     preview: preview(latestReport(ticket)?.summary ?? ''), read: `ticket/${ticket.id}` }
 }

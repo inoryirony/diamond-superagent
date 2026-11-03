@@ -6,6 +6,8 @@ import { readGithub } from '../sources/github-read.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
 import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
+import { DINGTALK, displayName, type NamedSender } from '../sources/dingtalk-names.ts'
+import type { ContextMessage } from '../sources/kind.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
@@ -28,6 +30,16 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'desk', holds: 'open tickets, one line each: its state, when it last showed life, whether it is overdue or unreviewed, and its last report' },
   { name: 'triggers', holds: 'trigger cards with where each went, newest first' },
   { name: 'threads', holds: 'subscribed threads, newest activity first, with their labels, tickets, current assessment and polling errors' },
+  {
+    name: 'lanes',
+    holds: 'every lane with activity, newest first: one per conversation, Issue, or other Source thread, whether or not a ticket '
+      + 'subscribes to it; each with its label, its tickets and when it last saw a message',
+  },
+  {
+    name: 'lane/<key>',
+    holds: 'one lane whatever its Source: its label and link, its tickets and latest decisions, and its messages, newest first. '
+      + 'Main Session only, so it may read across conversations; a worker reads its own threads.',
+  },
   { name: 'thread/<key>', holds: 'one thread: its label and link, its tickets and latest decisions, and its triggers, newest first', executor: true },
   { name: 'decisions', holds: 'decisions, newest first' },
   { name: 'decision/<id>', holds: 'one decision with its audit' },
@@ -70,6 +82,8 @@ export interface ResourceHost {
   /** Whether a Session may read `revision` (the revision it currently runs under or any revision it ran under previously). */
   mayRead(sessionId: string, revision: number): boolean
   feishuPageSize(): number
+  /** Resolves DingTalk sender nicks to directory contacts (flower name, open DingTalk ID, whether each is the operator himself), cached in the store. */
+  dingtalkNames(nicks: readonly string[]): Promise<Map<string, NamedSender>>
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
   /** Reader of the conversation `trigger` was written in, or undefined when its Source keeps none. */
   threadContext(trigger: Trigger): TriggerContext | undefined
@@ -120,14 +134,59 @@ async function transcript(host: ResourceHost, ticketId: string) {
   return (await host.context.sessionController.inspect(workerSessionId(ticketId) as SessionId)).events
 }
 
-/** How many messages before a trigger its live history shows, and how much of each. */
-const HISTORY = 20, HISTORY_CHARS = 400
+/** How many messages before a trigger its live history shows at least, and how much of each. */
+const HISTORY = 30, HISTORY_CAP = 100, HISTORY_CHARS = 400
+/** A message body that names an attachment by the IDs `dws` prints in it, which the header's download commands take. */
+const ATTACHMENT = /mediaId=|fileId[:：]/
+/** `MM-dd HH:mm` in the local timezone, as a transcript line's timestamp reads. */
+const stamp = (iso: string): string => {
+  const parts = new Intl.DateTimeFormat('en-CA', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date(iso))
+  const of = (type: string) => parts.find(part => part.type === type)?.value ?? ''
+  return `${of('month')}-${of('day')} ${of('hour')}:${of('minute')}`
+}
+/**
+ * Renders a DingTalk conversation's history as one text block the model reads like a chat log: a header saying whose conversation
+ * this is (【我方】 marks the operator himself), the dws commands that page earlier messages and fetch attachments, an omitted
+ * marker when older messages were cut, then one line per message as 花名（真名）（时间） 正文. Senders the directory did not
+ * resolve keep the nick the message itself showed.
+ */
+async function dingtalkTranscript({ host, sessionId, signal }: Read, found: Trigger,
+  messages: readonly ContextMessage[], omitted = messages.length >= HISTORY): Promise<{ transcript: string }> {
+  const contacts = await host.dingtalkNames(messages.map(message => message.from))
+  const nameOf = (nick: string) => {
+    const contact = contacts.get(nick)
+    return contact ? displayName(contact) : nick
+  }
+  const sides = [...contacts.values()]
+  const mine = sides.filter(contact => contact.self).map(displayName)
+  const theirs = [...new Set(messages.map(message => message.from))]
+    .filter(nick => contacts.get(nick)?.self !== true).map(nameOf)
+  const conversation = typeof found.meta.conversationId === 'string' ? found.meta.conversationId : ''
+  const chatName = host.store.get(KV.dingtalk.chats)?.[conversation]?.name
+  const who = found.meta.direct === true
+    ? `这是${mine[0] ?? '运营者本人'}【我方】与${theirs.join('、') || '对方'}【对方】的私聊`
+    : `这是群聊${chatName ? `「${chatName}」` : ''}的部分记录，${mine[0] ? `${mine[0]}为【我方】，` : ''}其余为群成员`
+  const header = `仅显示部分聊天记录：${who}（【我方】=运营者本人；名字为 花名（真名））。`
+    + `更早的记录用 dws chat message list --open-dingtalk-id <对方ID> --time "<时间>" --direction older 查看；`
+    + `图片/视频/语音用 dws chat message download-media --type mediaId --resource-id <mediaId> --message-id <openMessageId> --open-conversation-id <会话ID> --output <路径> 下载（mediaId 在正文里，openMessageId 在附件标注里）；文件附件的 fileId 用 dws 钉盘命令获取。`
+    + (conversation ? `本会话ID：${conversation}` : '')
+  const lines = messages.map(message => {
+    const text = message.text.slice(0, HISTORY_CHARS).replace(/\]\(mediaId=/g, ' mediaId=')
+    const attachment = ATTACHMENT.test(message.text) ? ` [附件：openMessageId=${message.id}]` : ''
+    return `${nameOf(message.from)}（${stamp(message.at)}）${text}${attachment}`
+  })
+  const transcript = [header, ...(omitted ? ['<previous chat message omitted>'] : []), ...lines].join('\n')
+  host.pages.set(`${sessionId}:history:${found.id}`, JSON.stringify({ transcript }))
+  return { transcript }
+}
 /**
  * The latest messages of the conversation a trigger was written in, read live from its Source: the store holds only what arrived
  * after subscription, so the first direct message of a conversation has no neighbours there. A failed read is reported in place of
  * the history instead of failing the whole resource, and is not cached, so the next read tries again.
  */
-async function liveHistory({ host, sessionId, signal }: Read, found: Trigger) {
+async function liveHistory(read: Read, found: Trigger) {
+  const { host, sessionId, signal } = read
   const context = host.threadContext(found)
   // An issue tracker's thread is its own history; only a conversation of people needs one read live.
   if (!context?.chat) return undefined
@@ -135,16 +194,61 @@ async function liveHistory({ host, sessionId, signal }: Read, found: Trigger) {
   const cached = host.pages.get(cacheKey)
   if (cached !== undefined) return JSON.parse(cached)
   try {
-    const { messages } = await context.read(host.commands.withSignal(signal), 'thread')
+    const anchor = historyAnchor(host, found)
+    const messages = await pages(read, found, anchor)
     const triggered = Date.parse(found.at)
-    // The reader's page also holds the trigger itself and what came after it.
-    const history = messages.filter(message => !message.deleted && message.id !== context.messageId && !(Date.parse(message.at) > triggered))
-      .slice(-HISTORY).map(({ id, from, at, text }) => ({ id, from, at, text: text.slice(0, HISTORY_CHARS) }))
-    host.pages.set(cacheKey, JSON.stringify(history))
-    return history
+    // The reader's page also holds the trigger itself and what came after it; the window ends at the trigger.
+    const before = messages.filter(message => !message.deleted && message.id !== context.messageId && !(Date.parse(message.at) > triggered))
+    const history = windowOf(before, anchor)
+    // A DingTalk conversation renders as a chat log the header above describes; other Sources keep their message list.
+    if (found.source === DINGTALK) return await dingtalkTranscript(read, found, history, messages.length > history.length)
+    const listed = history.map(({ id, from, at, text }) => ({ id, from, at, text: text.slice(0, HISTORY_CHARS) }))
+    host.pages.set(cacheKey, JSON.stringify(listed))
+    return listed
   } catch (error) {
     return { status: 'unavailable', error: (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200) }
   }
+}
+/** What the window must reach back to, and how far it may go. */
+interface HistoryAnchor { since?: string; floor: number; cap: number }
+/**
+ * The lane's window rules: at least `HISTORY` messages, extended back to the last decision on the lane and to the origin
+ * message of every open ticket on it, so each live intent starts inside the window; never past `HISTORY_CAP`. A day boundary
+ * is not an anchor: it would cut work open across it, as an episode gap once did.
+ */
+function historyAnchor(host: ResourceHost, found: Trigger): HistoryAnchor {
+  const lane = threadKey(found.threads[0]!)
+  const { store } = host
+  const origins = store.tickets.open()
+    .filter(ticket => ticket.origin.triggerIds.some(id => store.triggers.get(id)?.threads.some(ref => threadKey(ref) === lane)))
+    .flatMap(ticket => ticket.origin.triggerIds.flatMap(id => store.triggers.get(id)?.at ?? []))
+  const since = [store.decisions.byThread(lane).at(-1)?.at, ...origins].filter((at): at is string => !!at).sort()[0]
+  return { ...(since ? { since } : {}), floor: HISTORY, cap: HISTORY_CAP }
+}
+/** Reads backwards until the window can stop: past its anchor with at least its floor, at its cap, or at the history's start. */
+async function pages(read: Read, found: Trigger, anchor: HistoryAnchor): Promise<ContextMessage[]> {
+  const context = read.host.threadContext(found)
+  if (!context) return []
+  const commands = read.host.commands.withSignal(read.signal)
+  const seen = new Map<string, ContextMessage>()
+  let cursor: string | undefined
+  for (let page = 0; page < 10; page++) {
+    const part = await context.read(commands, 'thread', cursor)
+    for (const message of part.messages) seen.set(message.id, message)
+    const oldest = [...seen.values()].sort((left, right) => Date.parse(left.at) - Date.parse(right.at))[0]
+    const reached = seen.size >= anchor.floor && (!anchor.since || (!!oldest && oldest.at <= anchor.since))
+    if (!part.next || reached || seen.size >= anchor.cap) break
+    cursor = part.next
+  }
+  return [...seen.values()]
+}
+/** The newest messages within the window: back to its anchor, never fewer than its floor or more than its cap. */
+function windowOf(messages: readonly ContextMessage[], anchor: HistoryAnchor): ContextMessage[] {
+  const ascending = [...messages].sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+  const floor = ascending.slice(-anchor.floor)
+  const anchorIndex = anchor.since ? ascending.findIndex(message => message.at >= anchor.since!) : -1
+  const from = anchorIndex < 0 ? floor : ascending.slice(anchorIndex)
+  return from.slice(-anchor.cap)
 }
 
 const ROUTES: readonly Route[] = [
@@ -165,6 +269,28 @@ const ROUTES: readonly Route[] = [
     const { store } = main(read)
     const threads = store.read.subscribedThreads().sort((a, b) => (b.lastAt ?? b.createdAt).localeCompare(a.lastAt ?? a.createdAt))
     return list(read, (offset, count) => threads.slice(offset, offset + count).map(thread => threadCard(thread, threadTitle(store, thread))))
+  }],
+  ['lanes', read => {
+    const { store } = main(read), now = Date.now()
+    return list(read, (offset, count) => store.read.lanes(offset + count).slice(offset, offset + count).map(thread => ({
+      lane: thread.key, source: thread.ref.source, label: threadTitle(store, thread),
+      ...(thread.lastAt ? { last_at: thread.lastAt, minutes_ago: Math.max(0, Math.floor((now - Date.parse(thread.lastAt)) / 60_000)) } : {}),
+      tickets: thread.subscriptions.flatMap(id => { const ticket = store.tickets.get(id); return ticket ? [{ ticket_id: ticket.id, title: ticket.title,
+        state: ticketCard(ticket).state }] : [] }),
+      pending: thread.pending.length, evaluating: !!thread.evaluating, read: `lane/${thread.key}`,
+    })))
+  }],
+  ['lane/', read => {
+    const { host, rest } = read
+    main(read)
+    const thread = host.store.threads.get(rest)
+    if (!thread) throw new Error('Unknown lane')
+    const { store } = host
+    const { read: _read, tickets: ids, ...card } = threadCard(thread, threadTitle(store, thread))
+    const tickets = ids.flatMap(id => { const found = store.tickets.get(id); return found ? [ticketCard(found)] : [] })
+    const decisions = store.decisions.byThread(thread.key).slice(-THREAD_DECISIONS).reverse().map(decisionCard)
+    const page = list(read, (offset, count) => store.read.threadPage(thread.key, offset, count).map(triggerLine))
+    return { ...card, tickets, decisions, ...page }
   }],
   ['thread/', read => {
     const { host, rest, ticketId } = read
@@ -256,13 +382,15 @@ const ROUTES: readonly Route[] = [
       : disposition
     // Omit card preview and self-reference because this resource returns the full text.
     const { preview: _preview, chars: _chars, read: _read, ...card } = triggerCard(found, visible)
+    // A DingTalk trigger names its conversation, which the history header's attachment commands take.
+    const conversation = found.source === DINGTALK && typeof found.meta.conversationId === 'string' ? { conversation_id: found.meta.conversationId } : {}
     const parent = found.source === 'feishu' && typeof found.meta.parentId === 'string' ? found.meta.parentId : undefined
     const repliedTo = shown(parent ? host.store.triggers.get(feishuTriggerId(parent)) : undefined)
     const neighbours = host.store.read.neighbours(threadKey(found.threads[0]!), found.at, found.id)
     const around = { before: shown(neighbours.before), after: shown(neighbours.after) }
     // Only the main Session reads the live conversation: a worker may not see messages its ticket did not reach.
     const history = offset === 0 && !ticketId ? await liveHistory(read, found) : undefined
-    return { ...card, ...await host.sourceLink(found, signal), acknowledgement: host.store.replyStatus(key('ack', found.id)) ?? 'not_requested',
+    return { ...card, ...conversation, ...await host.sourceLink(found, signal), acknowledgement: host.store.replyStatus(key('ack', found.id)) ?? 'not_requested',
       ...(ref ? { context: feishuReferences(ref) } : {}),
       ...(offset === 0 ? {
         ...repliedTo ? { replied_to: triggerLine(repliedTo) } : {},

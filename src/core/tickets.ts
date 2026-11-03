@@ -1,7 +1,8 @@
 /** Tickets: their lifecycle from an accept to their end, their Subscriptions and their Inputs. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { STALL_MS, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, stalledSince, threadKey, waitsForPerson } from './model.ts'
+import { STALL_MS, holdsInput, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, stalledSince, threadKey,
+  waitsForPerson } from './model.ts'
 import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
   Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
@@ -105,13 +106,15 @@ export class Tickets extends EnginePart {
   }
   /**
    * The Trigger to attach to a ticket, once the ticket may take it.
-   * @throws UserError when the trigger or ticket is unknown, a ticket's worker still decides the trigger, a person stopped the ticket, or an ended ticket's Mandate no longer revalidates.
+   * @throws UserError when the trigger or ticket is unknown, a person stopped the ticket, or an ended ticket's Mandate no
+   * longer revalidates. A follow-up that reached another ticket is held there: the one it reached, or a person, moves it.
    */
   attachable(ticketId: string, triggerId: string): Trigger {
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
-    // A follow-up that reached a ticket goes elsewhere only once the workers that decide it hand it back.
-    this.leftToWorkers(trigger)
+    // Attaching the message to a ticket that already decides it grants nothing new; sending it to a different ticket would
+    // take it from the workers that decide it, so only a person may do that.
+    if (!this.owners(trigger).includes(ticketId)) this.leftToWorkers(trigger)
     const current = this.require(ticketId)
     if (current.ended?.by === 'human') throw new UserError('ticketStopped')
     if (!liveTicket(current) && !this.policy().revalidate(current.mandate)) throw new UserError('mandateRevoked')
@@ -185,11 +188,71 @@ export class Tickets extends EnginePart {
     this.emit('ticket.stalled', { ticketId, assignmentId: assignment.id, idleForMs: Date.parse(now) - Date.parse(anchor) })
   }
   /**
+   * Watches one held ticket for a conflict nobody settled by its `dueAt`: it emits `ticket.holdDue` so the main Session asks
+   * the people again or escalates to the operator, moves `dueAt` on by the same wait, and records that it asked. Nothing changes
+   * otherwise: only a release lifts the hold.
+   */
+  holdDue(ticketId: string, now: string): void {
+    const ticket = this.repo.tickets.get(ticketId)
+    const hold = ticket?.hold
+    if (!ticket || !hold || hold.released || !hold.dueAt || hold.dueAt > now) return
+    const waited = Date.parse(hold.dueAt) - Date.parse(hold.at)
+    hold.dueAt = new Date(Date.parse(now) + Math.max(waited, 60_000)).toISOString()
+    hold.remindedAt = now
+    ticket.updatedAt = now
+    this.repo.tickets.save(ticket)
+    this.emit('ticket.holdDue', { ticketId, question: hold.question, ...(hold.remindedAt ? { askedAt: hold.remindedAt } : {}) })
+  }
+  /**
    * Stops a ticket on behalf of a human, ending any active assignments.
    * @throws UserError when the ticket is unknown.
    */
   stop(ticketId: string, reason?: string): Ticket {
     this.end(ticketId, 'human', 'stopped', this.now(), reason)
+    return this.require(ticketId)
+  }
+  /**
+   * Park the inputs a conflict is about: two conversations gave the ticket opposite directions, and the main Session does not
+   * choose between them. Only the named Inputs wait (`see holdsInput`); the rest of the ticket keeps working. The question
+   * names both directions, each with who gave it and `options` a release may name. Holding one already held replaces it.
+   * @throws UserError when the ticket is unknown or ended.
+   */
+  hold(ticketId: string, hold: { question: string; inputs?: string[]; options?: { id: string; text: string; by: string }[];
+    triggerId?: string; dueAt?: string }): Ticket {
+    const ticket = this.require(ticketId)
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    const at = this.now()
+    ticket.hold = { id: key('hold', ticketId, at), question: hold.question, inputs: hold.inputs ?? [],
+      ...hold.options?.length ? { options: hold.options } : {}, ...(hold.triggerId ? { triggerId: hold.triggerId } : {}),
+      ...(hold.dueAt ? { dueAt: hold.dueAt } : {}), at }
+    ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+    return ticket
+  }
+  /**
+   * Settle a ticket's hold: the direction that stands reaches the worker as an Input of its own ahead of what waited, so it
+   * acts on the settlement rather than the conflict, and the Inputs the hold locked become eligible again. It is delivered
+   * even though the conflict waited on a person: the release is that person's answer. A pending Assignment starts here; one
+   * whose worker's turn ended is started by the caller, through `wake`.
+   * @throws UserError when the ticket is unknown or not held.
+   */
+  release(ticketId: string, resolution: string, by: 'person' | 'orchestrator', option?: string, triggerId?: string): Ticket {
+    const ticket = this.require(ticketId)
+    if (!ticket.hold || ticket.hold.released) throw new UserError('notHeld')
+    const at = this.now()
+    const released = ticket.hold
+    ticket.hold = { ...released, released: { at, resolution, by, ...(option ? { option } : {}), ...(triggerId ? { triggerId } : {}) } }
+    ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+    // The release is what the wait was for, and it bypasses the hold it settles; what it locked follows on the normal path.
+    const input: TicketInput = { id: key('input', ticketId, 'hold', released.id, 'released', at), kind: 'text',
+      text: `The question this ticket was held on is settled: ${resolution}`, at }
+    if (ticket.inputs.some(existing => existing.id === input.id)) return this.require(ticketId)
+    ticket.inputs.push(input); ticket.undelivered.push(input.id)
+    this.repo.tickets.save(ticket)
+    const running = runningAssignment(ticket), latest = latestAssignment(ticket)
+    if (running) this.options.executor.deliver(ticket, running)
+    else if (latest?.state === 'pending') this.options.executor.start(ticket, latest)
     return this.require(ticketId)
   }
   /**
@@ -288,8 +351,9 @@ export class Tickets extends EnginePart {
   addInput(ticket: Ticket, input: TicketInput): void {
     if (ticket.inputs.some(existing => existing.id === input.id)) return
     ticket.inputs.push(input); ticket.updatedAt = this.now()
-    // Hold back automated inputs while the worker is waiting on a person.
-    const held = liveTicket(ticket) && automatic(input) && waitsForPerson(ticket)
+    // An automated Input waits while the worker waits on a person, and one a hold names waits until the conflict is settled;
+    // the conflict's other work does not.
+    const held = liveTicket(ticket) && (automatic(input) && waitsForPerson(ticket) || holdsInput(ticket, input))
     if (!held) ticket.undelivered.push(input.id)
     this.repo.tickets.save(ticket)
     if (!liveTicket(ticket) || held) return

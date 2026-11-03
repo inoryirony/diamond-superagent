@@ -91,3 +91,25 @@ it('reports a failed read of the conversation in place of the history and keeps 
   expect(await h.runTool(h.runtime.masterId, 'orchestrator_read', { resource: `trigger/${trigger.id}` }))
     .toMatchObject({ history: { status: 'unavailable', error: 'dws exited 1' }, acknowledgement: 'not_requested', text: expect.stringContaining('为什么') })
 })
+
+it('refuses an attach that would subscribe the ticket to a conversation it does not follow and the message does not name it', async () => {
+  const { ticket, trigger } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  // A message in another chat, on a similar subject: attaching it would subscribe the ticket to that whole conversation.
+  const elsewhere = feishu('2', '@bot 同样的功能也有问题', { chat_id: 'oc_other' })
+  h.runtime.receive(elsewhere); await h.runtime.idle()
+  await h.readTrigger(h.runtime.masterId, elsewhere.id)
+  const [refused] = await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: elsewhere.id })
+  expect(refused).toEqual({ trigger_id: elsewhere.id, kind: 'attach', refused: expect.stringMatching(/would subscribe .* to a conversation it does not follow/) })
+  // Naming the ticket, or a message the ticket already received, is the pointer dispatch asks for.
+  const naming = feishu('3', `@bot 接着 ${ticket.id} 修`, { chat_id: 'oc_third' })
+  h.runtime.receive(naming); await h.runtime.idle()
+  await h.readTrigger(h.runtime.masterId, naming.id)
+  const [attached] = await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: naming.id })
+  expect(attached).toMatchObject({ kind: 'attach', ticket: { ticket_id: ticket.id } })
+  // A message in the ticket's own chat adds no subscription, so subject similarity there is not held.
+  const same = feishu('4', `@bot 为什么`, { chat_id: (trigger.meta as { chatId: string }).chatId })
+  h.runtime.receive(same); await h.runtime.idle()
+  await h.readTrigger(h.runtime.masterId, same.id)
+  const [own] = await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: same.id })
+  expect(own).toMatchObject({ kind: 'attach', ticket: { ticket_id: ticket.id } })
+})

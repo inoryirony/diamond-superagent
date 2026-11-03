@@ -77,5 +77,10 @@ export function storeReads(db: DatabaseSync) {
     ? values('SELECT value FROM thread WHERE subscribed = ? ORDER BY rowid', source)
     // Force the partial index so SQLite does not scan the entire table in rowid order.
     : values('SELECT value FROM thread INDEXED BY thread_subscribed WHERE subscribed IS NOT NULL ORDER BY rowid'),
+  /**
+   * Every Thread with activity, newest first: the lanes the main Session may read across, including those no ticket
+   * subscribes to. A conversation's Thread may hold no subscription and still be where people are talking.
+   */
+  lanes: (limit = 50): Thread[] => values('SELECT value FROM thread WHERE lastAt IS NOT NULL ORDER BY lastAt DESC LIMIT ?', limit),
   }
 }

@@ -30,6 +30,8 @@ export const AssessmentSchema = z.object({
   intent_evidence: z.string().trim().min(1).max(700).nullish().describe('For acceptance: the quotes that establish the three facts.'),
   acknowledgement: AcknowledgementSchema.nullish().describe('For acceptance: one sentence in the source language, posted as a reply to the trigger; omit only when a matched rule asks for silence.'),
   reason: z.string().min(1).max(500),
+  ack_seq: z.number().int().nonnegative().nullish()
+    .describe('The board_seq a conflict returned, once you have read its changes and this decision is still right. Omit it otherwise.'),
 }).strict().refine(value => value.decision !== 'accept' || !directionAllowed(value.direction) || !value.rule_assessments.some(rule => rule.matched)
   || !!value.worktree_name, { message: 'Accepted work requires a short English worktree_name', path: ['worktree_name'] })
 
@@ -48,7 +50,7 @@ const NO_CONTEXT = 'This Source gives no Thread context; assess the Trigger\'s o
 /** Host dependencies used by `MasterAssessor`. */
 export interface AssessorHost {
   /** Active evaluations in `Engine` that the assessor reads and decides. */
-  readonly engine: Pick<EngineForMainSession, 'candidate' | 'candidateDelivered' | 'decide'>
+  readonly engine: Pick<EngineForMainSession, 'candidate' | 'candidateDelivered' | 'decide' | 'changedSince' | 'boardSeq'>
   readonly commands: Commands
   readonly deployment: Deployment
   /** Durable effect queue through which candidate assessments are delivered. */
@@ -268,11 +270,23 @@ export class MasterAssessor implements Assessor {
       snapshots.set(cacheKey, body)
       return textPage(read.resource, body, read.offset, 4000)
   }
-  /** Converts the assessment into an outcome under current settings and passes it to `Engine.decide` for policy verification. */
-  async decide(triggerId: string, result: z.infer<typeof AssessmentSchema>, signal?: AbortSignal): Promise<{ state: string; ticket_id?: string; reason: string }> {
+  /**
+   * Converts the assessment into an outcome under current settings and passes it to `Engine.decide` for policy verification.
+   * An accept holds to the board the Session assessed: an open ticket that changed after `candidate.boardSeq`, and was not in
+   * the candidate, is returned as `conflict` instead of deciding, so two lanes do not open the same work twice.
+   */
+  async decide(triggerId: string, result: z.infer<typeof AssessmentSchema>, signal?: AbortSignal):
+    Promise<{ state: string; ticket_id?: string; reason: string; conflict?: { board_seq: number; changed: unknown[] } }> {
     const { candidate } = this.evalFor(triggerId)
     signal?.throwIfAborted()
     let outcome: AssessmentOutcome = assessmentOutcome(result, this.host.settings(), candidate.strength)
+    if (outcome.kind === 'accept') {
+      const known = new Set(candidate.tickets.map(ticket => ticket.id))
+      const since = result.ack_seq ?? candidate.boardSeq
+      const changed = this.host.engine.changedSince(since).filter(ticket => !known.has(ticket.id))
+      if (changed.length) return { state: 'conflict', reason: 'The board changed after this assessment; read these and decide again with ack_seq',
+        conflict: { board_seq: this.host.engine.boardSeq(), changed } }
+    }
     if (outcome.kind === 'accept' && outcome.acknowledgement) outcome = { ...outcome, acknowledgement: checkedImText(outcome.acknowledgement) }
     const decision = this.host.engine.decide(triggerId, { ...outcome, evalId: candidate.evalId })
     return { state: decision.kind, ...(decision.ticketId ? { ticket_id: decision.ticketId } : {}), reason: reasonText(decision.reason) }

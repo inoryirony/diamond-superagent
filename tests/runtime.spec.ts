@@ -1086,14 +1086,15 @@ it('lets a worker read the prompt version it works under and the ones it worked 
 })
 
 it('passes team text with template braces to every Session literally, without reading them as prompt variables', async () => {
-  const delivery = 'Pin the build to ${{ github.sha }}; keep {{x}} as written.'
+  // Communication is the team section every role reads; the Delivery section reaches workers only.
+  const communication = 'Pin the build to ${{ github.sha }}; keep {{x}} as written.'
   const current = runtime.prompts.current()
-  runtime.prompts.save({ ...current.config, delivery }, current.revision, 'panel')
+  runtime.prompts.save({ ...current.config, communication }, current.revision, 'panel')
   const { sessionId } = await acceptedTicket()
   for (const id of [runtime.masterId, sessionId]) {
     const section = sections.get(id)!
     const text = renderPrompt({ sections: [{ name: section.name, text: section.text({}), interpolate: section.interpolate }], contexts: [], tools: [], variables: {} })
-    expect(text).toContain(delivery)
+    expect(text).toContain(communication)
   }
 })
 

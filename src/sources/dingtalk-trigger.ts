@@ -1,19 +1,25 @@
-/** Normalizes DingTalk live events and `chat message list` items into domain Triggers, and groups a conversation into episodes. */
+/** Normalizes DingTalk live events and `chat message list` items into domain Triggers, and names a conversation's Thread. */
 import { z } from 'zod'
 import { key, type ChannelRef, type Trigger } from '../core/index.ts'
 
 export const SOURCE = 'dingtalk'
 /**
- * A direct chat has no topics, so a thread is an episode: a message that quotes another joins that message's root; otherwise
- * it joins the conversation's latest episode when it follows within this gap; otherwise it starts a new root.
+ * How close a message must follow a conversation's latest one to join its reply chain, which the root of a quote or of the
+ * `root` resource reads. It no longer decides the Thread: a conversation is one Thread however long the pauses in it (see
+ * `dingtalkThreadId`).
  */
 export const EPISODE_GAP_MS = 10 * 60_000
 /** Reply address of a DingTalk message; `direct` is explicit because a group and a direct chat are told apart by the event type. */
 export const dingtalkChannel = (conversationId: string, peerOpenId: string, messageId: string, direct = false): ChannelRef =>
   ({ source: SOURCE, thread: `dingtalk:${conversationId}`,
     address: { conversationId, peerOpenId, messageId, ...direct ? { direct: 'true' } : {} } })
-/** Thread ID of the episode a message belongs to, `conversation:root`, as `feishuThreadId` spells a topic's. */
-export const dingtalkThreadId = (conversationId: string, rootId: string): string => `${conversationId}:${rootId}`
+/**
+ * Thread ID of a conversation: one Thread per chat, not per reply chain. A conversation's messages belong together however
+ * long the gaps: a question and its contradicting correction are the same work, and slicing them apart by a pause left each
+ * slice judged without the other. `feishuThreadId` names a topic's Thread this way because a Feishu chat is several topics;
+ * a DingTalk chat has one.
+ */
+export const dingtalkThreadId = (conversationId: string): string => conversationId
 /** Deterministic trigger ID for a DingTalk message; the live and the history paths produce the same one. */
 export const dingtalkTriggerId = (messageId: string): string => key('dingtalk', messageId)
 
@@ -33,13 +39,13 @@ const EventSchema = z.object({
   messageAiSendFlag: z.string().nullish(), quoted_message: QuotedMessageSchema.optional(),
 })
 export type DingtalkEvent = z.infer<typeof EventSchema>
-/** The conversation's episode: the root its messages join and the time of the latest one, in milliseconds. */
+/** The conversation's latest root, kept for the `root` and `parent` resources of a message that quotes or chains onto one. */
 export interface Episode { rootId: string; lastAt: number }
-/** Episodes and quote roots per conversation, which the Source keeps in KV and tests keep in memory. */
+/** The conversation's latest root and each message's root, which the Source keeps in KV and tests keep in memory. */
 export interface DingtalkThreads {
   /** The root a message was recorded under, if the Source saw it. */
   root(conversationId: string, messageId: string): string | undefined
-  /** The conversation's latest episode, if it has one. */
+  /** The conversation's latest root, if it has one. */
   episode(conversationId: string): Episode | undefined
   /** The conversation's known peer, so a message the operator typed himself is answered to the other person. */
   peer(conversationId: string): string | undefined
@@ -47,8 +53,9 @@ export interface DingtalkThreads {
   remember(conversationId: string, messageId: string, rootId: string, at: number): void
 }
 /**
- * The root of the episode a message joins: the root of the message it quotes, or failing that the quoted message itself;
- * otherwise the conversation's episode when this message follows it within `EPISODE_GAP_MS`; otherwise the message itself.
+ * The root a message chains onto: the root of the message it quotes, or failing that the quoted message itself; otherwise the
+ * conversation's latest root when this message follows it within `EPISODE_GAP_MS`; otherwise the message itself. It names the
+ * `root` and `parent` resources a reader opens, not the Thread the message is filed under.
  */
 export function dingtalkRoot(event: DingtalkEvent, at: number, threads: DingtalkThreads): string {
   const quoted = event.quoted_message?.message_id
@@ -109,7 +116,7 @@ export function dingtalkTrigger(input: unknown, selfOpenId: string, threads: Din
   const peerOpenId = self ? threads.peer(event.conversation_id) ?? event.sender_open_dingtalk_id : event.sender_open_dingtalk_id
   const mentioned = event.mentioned ?? !direct
   return { id: dingtalkTriggerId(event.message_id), source: SOURCE,
-    threads: [{ source: SOURCE, id: dingtalkThreadId(event.conversation_id, rootId) }],
+    threads: [{ source: SOURCE, id: dingtalkThreadId(event.conversation_id) }],
     actor: { source: SOURCE, id: event.sender_open_dingtalk_id }, human: true,
     ...(direct ? { addressed: 'direct' as const } : mentioned ? { addressed: 'mention' as const } : {}),
     at, text: event.content,

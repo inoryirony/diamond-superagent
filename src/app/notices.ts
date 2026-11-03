@@ -88,6 +88,14 @@ export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket |
         + 'or start it afresh with orchestrator_ticket_restart; orchestrator_read shows its transcript.' },
       `Ticket ${ticketId} has been silent for ${minutes} minutes`)
   }
+  if (event.type === 'ticket.holdDue') {
+    const { ticketId, question } = event.data
+    return receiptNotice({ ticket_hold_due: { ticket_id: ticketId, question, read: `ticket/${ticketId}` }, at,
+      note: 'A conflict on this ticket was due to be settled and nobody has. Ask the people involved again in each conversation it '
+        + 'came from, or escalate it to the operator; settle it with orchestrator_ticket_release once someone answers. The inputs the '
+        + 'hold locks stay parked until then; the rest of the ticket keeps working.' },
+      `Ticket ${ticketId} is still held on a conflict that is due`)
+  }
   return undefined
 }
 

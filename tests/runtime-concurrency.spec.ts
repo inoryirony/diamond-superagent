@@ -730,7 +730,8 @@ describe('what a worker read', () => {
     await later()
     await h.runTool(one.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'Nothing to do' })
     await h.runtime.pump(); await h.runtime.idle()
-    expect(h.candidates()).not.toContain(thanks.id)
+    // The main Session reads the message's own candidate now, whatever the worker did with it.
+    expect(h.candidates()).toContain(thanks.id)
   })
   it('counts a message a retry delivered to its idle worker as read by the report of the turn it woke', async () => {
     const { one, thanks, ticket } = await completed()
@@ -745,7 +746,7 @@ describe('what a worker read', () => {
       vi.setSystemTime(Date.now() + 1000)
       await h.runTool(one.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'Nothing to do' })
     })
-    expect(h.candidates()).not.toContain(thanks.id)
+    expect(h.candidates()).toContain(thanks.id)
   })
   it('sends to Eval at a merge a message that reached the worker after its last step, which no step took before its turn ended', async () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))

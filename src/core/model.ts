@@ -68,18 +68,23 @@ export interface FollowupRecords {
 /**
  * The tickets whose worker decides a person's follow-up: those it reached on their own Threads that can still decide it
  * and did not hand it back. A ticket can while it is live, also once a person dropped its Subscription to the Thread, and
- * while it is ended, not by a person, with the Trigger waiting to resume it. None once a person sent it to Eval, or while
- * an Eval holds it, which an earlier version may have queued. While a ticket owns it, the message goes to no Eval, and the
- * main Session may only stop the work on it.
+ * while it is ended, not by a person, with the Trigger waiting to resume it. None once a person sent it to Eval, or, unless
+ * `underEval` says otherwise, while an Eval holds it. While a ticket owns it, the message goes to no Eval, and the main
+ * Session may only stop the work on it.
+ *
+ * `underEval` is for the main Session, which now reads every person's message as a candidate even while a ticket's worker
+ * decides it: the owner still decides, and the candidate exists only for the Session to read, ignore, or stop.
  */
-export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads'>, records: FollowupRecords): string[] {
+export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads'>, records: FollowupRecords,
+  options: { underEval?: boolean } = {}): string[] {
   if (!trigger.human) return []
   const disposition = records.triggers.disposition(trigger.id)
   if (!disposition || disposition.requeued) return []
   // The disposition alone rules most messages out, so a Thread or a ticket is read only for one that may have an owner.
   const returned = new Set(disposition.handbacks?.map(item => item.ticketId))
   const reached = disposition.fanout.filter(id => !returned.has(id) && !disposition.context?.includes(id))
-  if (!reached.length || records.threads.get(threadKey(trigger.threads[0]!))?.evaluating?.triggerIds.includes(trigger.id)) return []
+  if (!reached.length) return []
+  if (!options.underEval && records.threads.get(threadKey(trigger.threads[0]!))?.evaluating?.triggerIds.includes(trigger.id)) return []
   return reached.filter(id => {
     const ticket = records.tickets.get(id)
     return !!ticket && (liveTicket(ticket) || (ticket.ended?.by !== 'human'
@@ -289,6 +294,30 @@ export type TicketEndBy = 'executor' | 'human'
 export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'stopped'
 /** A question for a person; `triggerId` is the human message that raised it, whose conversation it goes back to. */
 export interface Attention { id: string; question: string; triggerId?: string }
+/**
+ * A hold on a ticket: two conversations gave it opposite directions and neither is plainly right, so it parks until someone
+ * settles which stands. It locks only the messages in dispute (`inputs`), not the ticket: work the conflict does not touch
+ * carries on. The question names both directions with who gave each; `options` are the directions a release may choose from.
+ */
+export interface Hold {
+  id: string
+  /** What conflicts, naming both directions and the person who gave each, each quoting the message it came from. */
+  question: string
+  /** The directions a release may settle on, most likely first; a release names one or says which it stands for. */
+  options?: { id: string; text: string; by: string }[]
+  /** The message that raised the conflict, so a reader can open it. */
+  triggerId?: string
+  /** The Thread the conflict came from, when its message is not enough to place it. */
+  thread?: string
+  /** The inputs it locks: they wait, and the rest of the ticket does not. Empty while a conflict names only the ticket itself. */
+  inputs: string[]
+  at: string
+  /** When a person was last asked to settle it, and when a reminder is due, so a silent conflict cannot become a quiet stop. */
+  dueAt?: string
+  remindedAt?: string
+  /** How it was settled, once it was; a held ticket has none. */
+  released?: { at: string; resolution: string; by: 'person' | 'orchestrator'; triggerId?: string; option?: string }
+}
 /** Ticket aggregate: an authorized work item with its assignments, channels, thread bindings, and inputs. */
 export interface Ticket {
   id: string
@@ -301,6 +330,8 @@ export interface Ticket {
   ended?: { at: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
   /** Open question for a person; cleared by the executor or when the ticket ends. */
   attention?: Attention
+  /** A conflict parked until someone settles which direction stands (see `Hold`); none on an unheld ticket. */
+  hold?: Hold
   assignments: Assignment[]
   inputs: TicketInput[]
   /** Inputs not yet handed to a running assignment. */
@@ -421,13 +452,17 @@ export function readUntil(ticket: Pick<Ticket, 'assignments'>, progress = true):
 }
 /**
  * Whether a ticket waits for a person: its latest Assignment reported blocked or failed, and no person's message reached it
- * since. A later report that is neither, a person's message, or a retry, which starts a new Assignment, lifts it.
+ * since. A later report that is neither, a person's message, or a retry, which starts a new Assignment, lifts it. A hold is
+ * not this wait: it locks the inputs it names, and the rest of the ticket carries on (see `holdsInput`).
  */
 export function waitsForPerson(ticket: Ticket): boolean {
   const report = latestAssignment(ticket)?.report
   if (report?.state !== 'blocked' && report?.state !== 'failed') return false
   return !ticket.inputs.some(input => input.kind === 'trigger' && input.human && !input.context && input.at > report.at)
 }
+/** Whether an open hold locks `input`: a message in dispute waits for someone to settle it, and others do not. */
+export const holdsInput = (ticket: Pick<Ticket, 'hold'>, input: { id: string }): boolean =>
+  !!ticket.hold && !ticket.hold.released && (ticket.hold.inputs.includes(input.id) || ticket.hold.inputs.length === 0)
 /** The reports of an Assignment in order: its ledger, or, for one written before the ledger, the one report it kept, which a worker wrote. */
 export const reportHistory = (assignment: Assignment): ReportEntry[] =>
   assignment.reports ?? (assignment.report ? [{ by: 'worker', ...assignment.report }] : [])

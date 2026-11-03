@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
-import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople, type Reason }
+import { UserError, followupOwners, key, reasonText, threadKey, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople, type Reason }
   from '../../core/index.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
 import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
@@ -20,7 +20,7 @@ const RoutingNoteSchema = z.string().trim()
   .describe(`Optional routing background or explicit human constraint, at most ${NOTE_WORDS} words. Never add implementation instructions or replace the original source.`)
 export interface MainToolsHost {
   readonly context: Context
-  readonly engine: Pick<EngineForMainSession, 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
+  readonly engine: Pick<EngineForMainSession, 'candidate' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note' | 'hold' | 'release'> & EngineForPeople
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings'>
   readonly prompts: Pick<Prompts, 'preview' | 'save'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'modelRetry'>
@@ -54,11 +54,13 @@ const RouteItemSchema = z.object({
   acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
   note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
   reason: z.string().nullish().describe('ignore and stop: why, at most 500 characters; an ignore needs it. chatter and duplicate are recorded as those reasons.'),
-  text: z.string().nullish().describe('answer: the answer, posted where the question was written, naming the evidence used; its Source sets the length limit.'),
+  text: z.string().nullish().describe('answer: the answer, posted where the question was written, naming the file, query or log line used; its Source sets the length limit.'),
+  ack_seq: z.number().int().nonnegative().nullish()
+    .describe('accept and attach: the board_seq a refusal returned, once you have read its changes and this item is still right. Omit it otherwise.'),
 }).strict()
 type RouteItem = z.infer<typeof RouteItemSchema>
 type Kind = RouteItem['kind']
-type Field = Exclude<keyof RouteItem, 'kind' | 'trigger_id'>
+type Field = Exclude<keyof RouteItem, 'kind' | 'trigger_id' | 'ack_seq'>
 /** Each field's check, the kinds whose items read it and those that need it; an item of another kind leaves it unread. */
 const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: readonly Kind[] }> = {
   ticket_id: { check: z.string(), reads: ['attach', 'stop'], needs: ['attach', 'stop'] },
@@ -86,6 +88,42 @@ function unread(host: MainToolsHost, item: RouteItem, calls: readonly { name: st
   if (readConversation(calls, { id: trigger.id, conversationId: text(meta.conversationId), peerOpenId: text(meta.peerOpenId) })) return undefined
   return `Read the conversation first: orchestrator_read trigger/${trigger.id} (it carries the live history) or dws chat message list on its conversation, then route again.`
 }
+/** The conversation a trigger was written in: the Source's own chat identity, which survives an episode boundary. */
+const conversationOf = (trigger: { source: string; meta: Record<string, unknown>; threads: readonly { source: string; id: string }[] }): string => {
+  const chat = trigger.meta.chatId ?? trigger.meta.conversationId
+  return typeof chat === 'string' && chat ? `${trigger.source}:chat:${chat}` : `${trigger.source}:thread:${trigger.threads[0]?.id ?? ''}`
+}
+/**
+ * Why an attach may not run: it would subscribe the ticket to a conversation it does not follow, and the message does not point
+ * at the ticket. A wrong attachment subscribes the ticket to that whole conversation and never comes undone; a message in a
+ * conversation the ticket already follows adds no subscription, so only the first kind is held. The pointers dispatch names are
+ * checked: the message text naming the ticket or a link, or the message answering one this ticket already received. The main
+ * Session's read of the conversation is already required (`unread`), so an attach that fails this is a subject similarity the
+ * model mistook for a pointer.
+ */
+function unattached(host: MainToolsHost, item: RouteItem): string | undefined {
+  if (item.kind !== 'attach' || !item.ticket_id) return undefined
+  const trigger = host.store.triggers.get(item.trigger_id)
+  const ticket = host.store.tickets.get(item.ticket_id)
+  if (!trigger || !ticket) return undefined // The Engine reports an unknown trigger or ticket itself.
+  const conversation = conversationOf(trigger)
+  // A conversation this ticket already follows gains no subscription, so the attach cannot widen what reaches it.
+  const known = [...ticket.origin.triggerIds, ...ticket.inputs.flatMap(input => input.kind === 'trigger' ? [input.triggerId] : [])]
+  const followed = known.some(id => {
+    const earlier = host.store.triggers.get(id)
+    return earlier ? conversationOf(earlier) === conversation : false
+  }) || ticket.follows?.some(follow => follow.thread === threadKey(trigger.threads[0]!)) === true
+  if (followed) return undefined
+  if (trigger.text.includes(ticket.id)) return undefined
+  // A reply to a message this ticket already received continues that ticket's discussion.
+  const meta = trigger.meta as Record<string, unknown>
+  const parent = typeof meta.parentId === 'string' ? meta.parentId : undefined
+  const answering = parent
+    ? ticket.inputs.some(input => input.kind === 'trigger' && host.store.triggers.get(input.triggerId)?.meta.messageId === parent)
+    : false
+  if (answering) return undefined
+  return `This message would subscribe ${ticket.id} to a conversation it does not follow (${conversation}), and it does not point at the ticket: its text names no ticket or link, and it answers no message the ticket received. Attaching a message on a similar subject subscribes the ticket to that whole conversation for good. Route it as accept or ignore instead, or attach the message that does point at the ticket.`
+}
 /** Why an item cannot run: a field its kind needs is missing, or one it reads breaks its limit. */
 function invalid(item: RouteItem): string | undefined {
   for (const [field, { check, reads, needs }] of Object.entries(FIELDS) as [Field, typeof FIELDS[Field]][]) {
@@ -101,6 +139,23 @@ function invalid(item: RouteItem): string | undefined {
   return undefined
 }
 type Routed = { decision?: DecisionKind; reason: string; ticketId?: string | undefined; triggerIds?: readonly string[] }
+/**
+ * The tickets this item's decision did not see: open tickets that changed after the board revision the Session assessed,
+ * whose change bears on the same work. A lane that accepted or attached without seeing them could duplicate a ticket another
+ * conversation just opened, so the item is not committed; the Session reads these cards and routes again with `ack_seq`.
+ */
+function unseen(host: MainToolsHost, item: RouteItem): { boardSeq: number; changed: unknown[] } | undefined {
+  if (item.kind !== 'accept' && item.kind !== 'attach') return undefined
+  const candidate = host.engine.candidate(item.trigger_id)
+  // A trigger no Eval holds was routed directly, on the message the Session read itself: nothing was assessed to go stale.
+  if (!candidate) return undefined
+  const since = item.ack_seq ?? candidate.boardSeq
+  const known = new Set(candidate.tickets.map(ticket => ticket.id))
+  const changed = host.store.tickets.changedSince(since)
+    .filter(({ ticket }) => ticket.id !== item.ticket_id && !known.has(ticket.id))
+    .map(({ ticket, revision }) => ({ ...ticketCard(ticket), revision }))
+  return changed.length ? { boardSeq: host.store.tickets.boardSeq(), changed } : undefined
+}
 /**
  * Carry out one routing decision as its Engine command, in a transaction of its own. `decided` holds the Triggers that this
  * call's earlier items decided, with their batches.
@@ -163,6 +218,13 @@ function routeTool(host: MainToolsHost, agent: Pick<Agent, 'session'>): Tool {
         if (problem) return { ...head, refused: problem }
         const held = unread(host, item, calls)
         if (held) return { ...head, refused: held }
+        const off = unattached(host, item)
+        if (off) return { ...head, refused: off }
+        // A ticket another conversation changed since this Session assessed would not be in what it weighed: show it rather
+        // than commit beside it, and let the Session decide again with `ack_seq` once it has read these cards.
+        const stale = unseen(host, item)
+        if (stale) return { ...head, refused: `The board changed after this assessment: ${stale.changed.length} ticket(s) touched the same work `
+          + 'since you read the candidate. Read them below, then route this item again with ack_seq if it is still right, or change it.', ...stale }
         try {
           const result = route(host, item, decided)
           if ('refused' in result) return { ...head, ...result }
@@ -230,6 +292,42 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       },
     }),
     tool({
+      name: 'orchestrator_ticket_hold',
+      description: 'Park the inputs a conflict is about when two conversations gave the ticket opposite directions, instead of choosing one: those inputs wait and the rest of the ticket keeps working. The question must be option-shaped: name each direction, who gave it, and quote the words; `options` list the directions a release may pick. Use it only for a real contradiction, never for an unfinished or unclear request.',
+      schema: z.object({
+        ticket_id: z.string(),
+        question: z.string().trim().min(1).max(1000).describe('What conflicts: direction A with who gave it and its words, then direction B with who gave it and its words.'),
+        options: z.array(z.object({
+          id: z.string().trim().min(1).max(40).describe('A short id the release names, such as a or b.'),
+          text: z.string().trim().min(1).max(500).describe('The direction that option settles on, in the terms the worker must act on.'),
+          by: z.string().trim().min(1).max(200).describe('Who gave this direction, by name.'),
+        })).min(2).max(4).describe('The directions a release may settle on.'),
+        inputs: z.array(z.string()).max(20).optional().describe('The ticket input ids in dispute; omit while the conflict is about the ticket itself.'),
+        trigger_id: z.string().trim().min(1).optional().describe('The message that raised the conflict, so a reader can open it.'),
+        due_in_minutes: z.number().int().min(5).max(10_080).optional().describe('When to ask again if nobody settles it; default one day.'),
+      }).strict(),
+      execute: async args => {
+        const dueAt = new Date(Date.now() + (args.due_in_minutes ?? 1440) * 60_000).toISOString()
+        const ticket = host.engine.hold(args.ticket_id, { question: args.question, options: args.options,
+          ...(args.inputs?.length ? { inputs: args.inputs } : {}), ...(args.trigger_id ? { triggerId: args.trigger_id } : {}), dueAt })
+        return routed(host, { reason: 'Held on a conflict until someone settles it', ticketId: ticket.id })
+      },
+    }),
+    tool({
+      name: 'orchestrator_ticket_release',
+      description: 'Settle a held ticket: the resolution says which direction stands, in the terms the hold named, and reaches the worker ahead of what waited. Release it as soon as a person answers, in either conversation; name the hold option that person chose.',
+      schema: z.object({
+        ticket_id: z.string(),
+        resolution: z.string().trim().min(1).max(2000).describe('Which direction stands and why, as the worker must act on it.'),
+        option: z.string().trim().min(1).max(40).optional().describe('The hold option this settles on, when one of them stands.'),
+        trigger_id: z.string().trim().min(1).optional().describe('The message that settled it, when one did.'),
+      }).strict(),
+      execute: async args => {
+        const ticket = host.engine.release(args.ticket_id, args.resolution, 'orchestrator', args.option, args.trigger_id)
+        return routed(host, { reason: 'Released with the settled direction', ticketId: ticket.id })
+      },
+    }),
+    tool({
       name: 'orchestrator_trigger_requeue',
       description: 'Queue a trigger for a fresh assessment, such as after its Source\'s access changed; a follow-up that reached a ticket comes back only from its worker.',
       schema: z.object({ trigger_id: z.string() }).strict(),
@@ -261,6 +359,9 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       schema: z.object({ trigger_id: z.string().min(1), ...AssessmentSchema.shape }).strict(),
       execute: async ({ trigger_id, ...result }, signal) => {
         const decided = await host.assessor.decide(trigger_id, AssessmentSchema.parse(result), signal)
+        // A conflict decides nothing: the board moved after this assessment, and its cards go back with it.
+        if (decided.conflict) return { refused: decided.reason, decision: 'conflict',
+          board_seq: decided.conflict.board_seq, changed: decided.conflict.changed }
         return routed(host, { decision: decided.state as DecisionKind, reason: decided.reason, ticketId: decided.ticket_id })
       },
     }),

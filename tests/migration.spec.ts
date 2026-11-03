@@ -18,6 +18,8 @@ function schema10(path: string, records: Record<string, unknown>, rows: { ticket
   new Store(path).close()
   const db = new DatabaseSync(path)
   db.exec('DROP TABLE outbox; CREATE TABLE outbox (id TEXT PRIMARY KEY, value TEXT NOT NULL, sent INTEGER NOT NULL DEFAULT 0)')
+  // Schema 12 added `ticket.revision`; a schema 10 database has the two columns before it, and no index naming it.
+  db.exec('DROP INDEX IF EXISTS ticket_revision; ALTER TABLE ticket DROP COLUMN revision')
   const set = (name: string, value: unknown) => db.prepare('INSERT INTO kv VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(name, JSON.stringify(value))
   set('schema', 10)
   for (const [name, value] of Object.entries(records)) set(name, value)
@@ -202,7 +204,7 @@ it('changes nothing when one step fails: the database stays at schema 10 as it w
     updatedAt: '2', mandate: mandate({ via: 'listed' }), meta: { sourceTriggerId: 'trig-1', workspace: '/w/fix-1' } }
   // The current settings must validate; an invalid value aborts the migration transaction.
   schema10(path, { settings: { executor: { maxWorkers: 'many' } } }, { ticket: [ticket] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: the settings: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 12 failed: the settings: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t1'").get()!.value))).toMatchObject({ meta: { workspace: '/w/fix-1' } })
@@ -475,7 +477,7 @@ it('names the ticket it stopped at when a ticket does not read, and leaves the d
   const path = join(directory, 'db.sqlite')
   const { inputs: _inputs, ...broken } = ticket10('t9')
   schema10(path, {}, { ticket: [broken] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: ticket t9: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 12 failed: ticket t9: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t9'").get()!.value))).toEqual(broken)

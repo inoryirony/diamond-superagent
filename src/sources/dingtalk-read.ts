@@ -43,6 +43,7 @@ const timeOf = (message: Message): string => dingtalkTime({ timestamp: message.t
 export function dingtalkView(message: Message): ContextMessage {
   const body = message.text ?? message.content ?? ''
   return { id: String(message.openMessageId ?? message.messageId ?? message.openMessage ?? ''), from: message.sender ?? '',
+    senderId: message.senderOpenDingTalkId || undefined,
     at: timeOf(message), text: body }
 }
 /** Merges the older and the newer page into one ascending list of unique messages. */

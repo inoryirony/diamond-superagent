@@ -35,6 +35,11 @@ export interface Candidate {
   policyVersion: string
   /** Every live ticket, on any thread, and the ended ones of this thread, for duplicate and relation judgement. */
   tickets: Ticket[]
+  /**
+   * The board's revision when this candidate was formed. A decision holds to it: a ticket that changed after it is shown to
+   * the main Session before its decision is recorded, so two lanes never open the same work twice.
+   */
+  boardSeq: number
 }
 
 export type AssessmentOutcome =
@@ -143,6 +148,11 @@ export interface DomainEvents {
    * Session decides whether to ask again or restart it. The ticket and its Assignment are left as they are.
    */
   'ticket.stalled': { ticketId: string; assignmentId: string; idleForMs: number }
+  /**
+   * A held ticket's `dueAt` passed with nobody settling it: the main Session asks the people again, or escalates to the
+   * operator. A hold that is never asked about would be a second kind of silent stop.
+   */
+  'ticket.holdDue': { ticketId: string; question: string; askedAt?: string }
   'thread.subscribed': { threadKey: string; ticketId: string }
   /** A person dropped every ticket's Subscription, or a ticket's Executor its own, for `reason`. */
   'thread.unsubscribed': { threadKey: string; ticketId: string; by: 'person' | 'executor'; reason?: string }
@@ -178,6 +188,10 @@ export interface Repositories {
     open(): Ticket[]
     /** Tickets with undelivered Inputs or a pending or running Assignment, which is always the latest. */
     active(): Ticket[]
+    /** The board's newest change; a Candidate carries it so a later decision can tell what changed since. */
+    boardSeq(): number
+    /** The open tickets whose content changed after `since`, with the revision each changed at. */
+    changedSince(since: number): { ticket: Ticket; revision: number }[]
   }
   decisions: {
     get(id: string): Decision | undefined

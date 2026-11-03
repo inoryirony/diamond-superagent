@@ -1,4 +1,4 @@
-/** Follow-up routing: human messages on subscribed threads go directly to the ticket worker and notify the main session without starting an Eval. */
+/** Follow-up routing: a human message on a subscribed thread reaches the ticket worker, and the main Session reads it as a candidate it usually ignores. */
 import { afterEach, expect, it, vi } from 'vitest'
 import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
 import { repliedTo } from '../src/app/links.ts'
@@ -11,7 +11,7 @@ const followup = (id: string, text: string, overrides: Record<string, unknown> =
   ...overrides })
 const notices = (host: Host) => host.relays(host.runtime.masterId).filter(item => item.kind === 'follow_up')
 
-it('delivers a follow-up to the worker and tells the main Session with a card, without an Eval', async () => {
+it('delivers a follow-up to the worker, tells the main Session with a card, and leaves it a candidate to read', async () => {
   h = await startRuntime()
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   h.deliveries.mockClear()
@@ -24,12 +24,10 @@ it('delivers a follow-up to the worker and tells the main Session with a card, w
     replies_to: { trigger_id: ticket.origin.triggerId, preview: '@bot 修一下回归' },
     delivered_to: [{ ticket_id: ticket.id, title: ticket.title, state: 'working' }],
       note: expect.stringContaining('worker has it and decides') }])
-  // No candidate, no Eval, no Decision: nothing waits on the main Session, and the Thread's queue stays free.
-  expect(h.candidates()).toEqual([])
-  expect(h.runtime.store.threads.get(THREAD)).toMatchObject({ pending: [] })
-  expect(h.runtime.store.threads.get(THREAD)).not.toHaveProperty('evaluating')
+  // The main Session reads the message too, as a candidate it may ignore; the worker still decides it.
+  expect(h.candidates()).toEqual([message.id])
   expect(h.runtime.store.decisions.byThread(THREAD)).toHaveLength(1)
-  expect(h.runtime.store.triggers.disposition(message.id)).toEqual({ fanout: [ticket.id], at: expect.any(String) })
+  expect(h.runtime.store.triggers.disposition(message.id)).toMatchObject({ fanout: [ticket.id] })
 })
 
 it('sends a person\'s message that reaches no ticket, such as only one a person stopped, to Eval as before', async () => {
@@ -110,7 +108,11 @@ it('costs the main Session one model call for a burst of follow-ups while it wor
     const calls = modelCalls(h)
     for (const id of ['2', '3', '4', '5', '6']) h.runtime.receive(followup(id, `第 ${id} 条补充`, { sender_id: 'ou_guest' }))
     await h.runtime.idle()
-    expect([notices(h).length, h.candidates().length, calls()]).toEqual([5, 0, busy ? 1 : 2])
+    // Five follow-ups reach the worker and the main Session alike. One Eval runs at a time on a Thread, so the first is its
+    // candidate and the rest wait behind it; each of the five is accounted for, and the turn costs what it did before.
+    const thread = h.runtime.store.threads.get(THREAD)!
+    const judged = 1 + thread.pending.length
+    expect([notices(h).length, judged, calls()]).toEqual([5, 5, busy ? 1 : 2])
     await h.stop(); h = undefined
   }
 })
@@ -139,13 +141,14 @@ it('relays a message a worker handed back as a candidate with the worker\'s reas
   h.runtime.receive(message)
   await h.runtime.idle()
   expect(await h.runTool(sessionId, 'orchestrator_trigger_handback', { trigger_id: message.id, reason: 'It asks for an export button.' }))
-    .toEqual({ trigger_id: message.id, queued: true })
+    .toEqual({ trigger_id: message.id, queued: false })
   await h.runtime.pump(); await h.runtime.idle()
-  // The candidate tells the main Session; no requeue notice comes before it.
+  // The message already waited for the main Session as a candidate; the hand-back adds its reason to what the Session reads,
+  // and no requeue notice comes before it.
   const injected = h.agents.get(h.runtime.masterId)!.inject.mock.calls.map(([notice]) => JSON.stringify(notice))
   expect(injected.filter(notice => notice.includes('trigger_requeued'))).toEqual([])
-  expect(h.cards().find(item => item.trigger_id === message.id)).toMatchObject({ strength: 'explicit',
-    handed_back: [{ trigger_id: message.id, ticket_id: ticket.id, reason: 'It asks for an export button.' }] })
+  expect(h.runtime.store.triggers.disposition(message.id)!.handbacks)
+    .toEqual([{ ticketId: ticket.id, reason: 'It asks for an export button.', at: expect.any(String) }])
   await expect(h.runTool(sessionId, 'orchestrator_trigger_handback', { trigger_id: message.id,
     reason: 'Again' })).rejects.toThrow(/handed that trigger back/)
   // Attaching it back to the ticket that returned it is refused.
@@ -218,20 +221,26 @@ it('tells the main Session nothing of a message it attached to an ended ticket, 
   expect(notices(h)).toEqual([])
 })
 
-it('tells the main Session of a follow-up an earlier version queued for Eval, when the queue lets it go', async () => {
+it('assesses a follow-up an earlier version queued for Eval instead of dropping it, and tells the main Session with its notice', async () => {
   h = await startRuntime()
   const { ticket } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const message = followup('2', '顺便看看日志')
   h.deliveries.mockClear()
-  // An earlier version delivered the follow-up to the ticket, queued it for Eval as well, and told the main Session nothing.
+  // An earlier version delivered a follow-up to the ticket and queued it for Eval; the queue no longer drops it, since the
+  // main Session reads every person's message, so it becomes a candidate the worker still decides.
   h.runtime.store.atomic(() => {
     h!.runtime.store.triggers.save(message)
     h!.runtime.store.triggers.saveDisposition(message.id, { fanout: [ticket.id], at: message.at })
     h!.runtime.store.threads.save({ ...h!.runtime.store.threads.get(THREAD)!, pending: [message.id] })
   })
   await h.runtime.pump(); await h.runtime.idle()
-  expect(h.runtime.store.threads.get(THREAD)).toMatchObject({ pending: [] })
-  expect(notices(h)).toEqual([expect.objectContaining({ trigger_id: message.id, delivered_to: [expect.objectContaining({ ticket_id: ticket.id })] })])
+  // The queued follow-up became an Eval the main Session reads, which its ticket's worker still decides.
+  expect(h.candidates()).toEqual([message.id])
+  // The notice of a follow-up a ticket reached comes with the receive; reading its message again now tells it.
+  h.runtime.receive(followup('3', '顺便看看日志'))
+  await h.runtime.idle()
+  expect(notices(h)).toEqual([expect.objectContaining({ trigger_id: followup('3', '顺便看看日志').id,
+    delivered_to: [expect.objectContaining({ ticket_id: ticket.id })] })])
 })
 
 it('sends a request on a thread a worker follows only for context to Eval, and marks the worker\'s copy as context', async () => {
@@ -280,7 +289,8 @@ it('keeps a listed member\'s request on a ticket\'s thread to that ticket, so it
   expect(await h.runTool(sessionId, 'orchestrator_ack', { trigger_id: request.id, text: '收到：概览页的保存按钮也一起改。' }))
     .toMatchObject({ trigger_id: request.id })
   expect(h.runtime.store.tickets.list().map(item => item.id)).toEqual([ticket.id])
-  expect(h.candidates()).toEqual([])
+  // The main Session read it as a candidate and left it to the worker, which took it up: the candidate stays readable.
+  expect(h.candidates()).toEqual([request.id])
 })
 
 it('leaves a follow-up to its ticket\'s worker after the main Session drops the subscriptions of its thread', async () => {

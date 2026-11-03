@@ -365,6 +365,7 @@ const TEXT = {
   'stage.blocked': ['待处理受阻', 'Blocked'],
   'stage.failed': ['待处理失败', 'Failed'],
   'stage.delivery': ['输入未送达', 'Input undelivered'],
+  'stage.held': ['冲突挂起', 'Held on a conflict'],
   'stage.queued': ['排队中', 'Queued'],
   'stage.working': ['执行中', 'Working'],
   'stage.idle': ['等待新触发', 'Waiting for a Trigger'],
@@ -388,6 +389,10 @@ const TEXT = {
   executionDirectoryEmpty: ['留空：默认目录', 'Empty: the default directory'],
   openThread: ['打开 {source} 原文', 'Open on {source}'],
   executionDirectoryHint: ['每个工单在这里有自己的目录，以工单短名命名；执行器 Session 在其中工作。这只按目录分开工单，不是安全边界。', 'Each Ticket gets its own directory here, named by its short name, where its Executor Session works. This separates Tickets by directory only; it is not a security boundary.'],
+  executionWorkspace: ['主 Session 的工作区', 'Main Session workspace'],
+  executionWorkspaceDefault: ['留空时用 {root}', 'Empty uses {root}'],
+  executionWorkspaceEmpty: ['留空：状态目录', 'Empty: the state directory'],
+  executionWorkspaceHint: ['主 Session（orchestrator）在这里工作。它回答问题时要读代码、查配置，所以要放仓库所在的目录，例如整个工作区的根；状态目录里没有仓库，答不出「某个工具属于哪个服务」。工单仍在自己目录里，不受影响。', 'The main Session works here. It reads code and configuration to answer questions, so point it at the directory holding the repositories, such as the workspace root; the state directory holds none, and an answer cannot locate which service a named tool belongs to. Tickets keep their own directories.'],
   prepareCommand: ['准备命令', 'Prepare command'],
   prepareCommandHint: ['新工单的目录建好前，在根目录下用 sh 运行一次，执行环境的变量是它的环境变量，例如用 git worktree 把仓库检出到 $DSH_SUPERAGENT_DIR。留空就是空目录。失败时工单显示失败，并附上命令的输出。', 'Runs once with sh in the root before a new Ticket\'s directory exists, with the execution environment\'s variables as its environment, for example to check a repository out to $DSH_SUPERAGENT_DIR with git worktree. Leave it empty for an empty directory. A failure fails the Ticket with the command\'s output.'],
   prepareCommandEmpty: ['留空：空目录', 'Empty: an empty directory'],
@@ -768,7 +773,8 @@ const TEXT = {
   'userError.notReached': ['这个触发不属于这个执行器。', USER_ERRORS.notReached[1]],
   'userError.handedBack': ['这个工单已经交回过这个触发。', USER_ERRORS.handedBack[1]],
   'userError.handedBackHere': ['这个工单的执行器已把这个触发交回，认为它超出本工单的范围：请把它作为新工作接单、关联到另一个工单，或忽略它。', USER_ERRORS.handedBackHere[1]],
-  'userError.workerDecides': ['这条消息已通过所在线程送达工单 {tickets}：由工单的执行器判断它是否属于这个工单，不属于的会被交回，之后作为候选到达。只有停止例外，用 orchestrator_route 并把 kind 设为 stop。', USER_ERRORS.workerDecides[1]],
+  'userError.workerDecides': ['这条消息已通过所在线程送达工单 {tickets}：由工单的执行器判断它是否属于这个工单，不属于的会被交回，之后作为候选到达。除另开新工单以外，stop、attach、ignore 都通过 orchestrator_route 完成。', USER_ERRORS.workerDecides[1]],
+  'userError.notHeld': ['这个工单当前没有挂起的冲突；只有被挂起的工单才能解除。', USER_ERRORS.notHeld[1]],
   'userError.ackNoChannel': ['确认需要一条已派给这个执行器、由人发出的原始消息。', USER_ERRORS.ackNoChannel[1]],
   'userError.ackNotPerson': ['请使用最初那条人发的触发，而不是机器人、CI 或执行器的报告。', USER_ERRORS.ackNotPerson[1]],
   'userError.notReady': ['工单还不能交付。进展只在内部保留，等待经过验证的就绪报告；不要把进展当作回答，也不要通过其他渠道发送。', USER_ERRORS.notReady[1]],
@@ -840,7 +846,7 @@ export const GLOSSARY = {
 export const GLOSSARY_VALUES = {
   decision: ['decision.accept', 'decision.reopen', 'decision.stop', 'decision.ignore', 'decision.unavailable'], strength: ['strength.explicit', 'strength.inferred'],
   ticket: ['stage.answer', 'stage.review', 'stage.returned', 'stage.running', 'stage.blocked', 'stage.failed', 'stage.delivery', 'stage.queued',
-    'stage.working', 'stage.idle', 'ticket.ended'],
+    'stage.working', 'stage.idle', 'stage.held', 'ticket.ended'],
   assignment: ['assignment.pending', 'assignment.running', 'assignment.ended'], report: ['report.progress', 'report.waiting', 'report.ready', 'report.blocked', 'report.failed', 'report.dropped'],
 } as const
 

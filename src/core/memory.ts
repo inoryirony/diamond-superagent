@@ -13,12 +13,17 @@ export class MemoryRepositories implements Repositories {
   private readonly threadRows = new Map<string, Thread>()
   private readonly ticketRows = new Map<string, Ticket>()
   private readonly decisionRows = new Map<string, Decision>()
+  /** The board's revision counter, and the revision each ticket last changed at. */
+  private board = 0
+  private readonly revisions = new Map<string, number>()
   atomic<T>(work: () => T): T {
-    const maps: Map<string, unknown>[] = [this.triggerRows, this.dispositions, this.threadRows, this.ticketRows, this.decisionRows]
+    const maps: Map<string, unknown>[] = [this.triggerRows, this.dispositions, this.threadRows, this.ticketRows, this.decisionRows, this.revisions]
     const snapshot = maps.map(map => new Map(map))
+    const board = this.board
     try { return work() }
     catch (error) {
       maps.forEach((map, index) => { map.clear(); for (const [id, value] of snapshot[index]!) map.set(id, value) })
+      this.board = board
       throw error
     }
   }
@@ -36,11 +41,20 @@ export class MemoryRepositories implements Repositories {
   }
   readonly tickets = {
     get: (id: string) => clone(this.ticketRows.get(id)),
-    save: (ticket: Ticket) => { this.ticketRows.set(ticket.id, clone(ticket)) },
+    save: (ticket: Ticket) => {
+      this.board += 1
+      this.ticketRows.set(ticket.id, clone(ticket))
+      this.revisions.set(ticket.id, this.board)
+    },
     /** Newest first, matching the SQLite Store's order. */
     list: () => [...this.ticketRows.values()].reverse().map(clone),
     open: () => this.tickets.list().filter(ticket => !ticket.ended),
     active: () => this.tickets.list().filter(ticket => ticket.undelivered.length > 0 || ['pending', 'running'].includes(latestAssignment(ticket)?.state ?? '')),
+    boardSeq: () => this.board,
+    changedSince: (since: number) => [...this.ticketRows.entries()]
+      .filter(([id, ticket]) => !ticket.ended && (this.revisions.get(id) ?? 0) > since)
+      .map(([id, ticket]) => ({ ticket: clone(ticket), revision: this.revisions.get(id) ?? 0 }))
+      .sort((left, right) => left.revision - right.revision),
   }
   readonly decisions = {
     get: (id: string) => clone(this.decisionRows.get(id)),

@@ -61,6 +61,8 @@ export interface SourceChannel<C> {
 /** Normalized message returned by thread context readers; `bot` marks a non-human sender whose message can never authorize work on its own (at most an inferred candidate). */
 export interface ContextMessage {
   id: string; from: string; at: string; text: string
+  /** The sender's account ID in the Source's own vocabulary (an open DingTalk ID), when the reader knows it; it tells the operator's own messages apart exactly. */
+  senderId?: string
   bot?: true; deleted?: true; reply_to?: string; url?: string; path?: string; line?: number
 }
 export type ContextPartName = 'thread' | 'root' | 'parent'

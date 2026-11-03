@@ -51,43 +51,46 @@ const event = (id: string, overrides: Record<string, unknown> = {}) => ({
 })
 
 describe('dingtalk triggers', () => {
-  it('reads a direct message as a human Trigger addressed to the operator, on a thread named after its episode', () => {
+  it('reads a direct message as a human Trigger addressed to the operator, on the conversation\'s Thread', () => {
     const state = threads()
     const trigger = dingtalkTrigger(event('mid_1'), SELF, state)!
     expect(trigger).toEqual({ id: key('dingtalk', 'mid_1'), source: SOURCE,
-      threads: [{ source: SOURCE, id: dingtalkThreadId(CONVERSATION, 'mid_1') }],
+      threads: [{ source: SOURCE, id: dingtalkThreadId(CONVERSATION) }],
       actor: { source: SOURCE, id: PEER }, human: true, addressed: 'direct', at: '2026-11-02T02:00:00.000Z',
       text: 'the login page is broken',
       channel: dingtalkChannel(CONVERSATION, PEER, 'mid_1', true),
       meta: { conversationId: CONVERSATION, messageId: 'mid_1', peerOpenId: PEER, direct: true, rootId: 'mid_1', sender: 'Alice' } })
-    expect(trigger.threads[0]!.id).toBe(`${CONVERSATION}:mid_1`)
+    // The Thread is the conversation itself, whatever the reply chain.
+    expect(trigger.threads[0]!.id).toBe(CONVERSATION)
     expect(state.episodes.get(CONVERSATION)).toEqual({ rootId: 'mid_1', lastAt: Date.parse('2026-11-02T02:00:00Z') })
   })
   it('reads a message that mentions the operator in a group as an admitted mention, and the group as its address', () => {
     const trigger = dingtalkTrigger(event('mid_2', { type: 'user_im_message_receive_at', conversation_id: GROUP }), SELF, threads())!
     expect(trigger).toMatchObject({ addressed: 'mention', human: true,
-      threads: [{ source: SOURCE, id: `${GROUP}:mid_2` }], channel: { source: SOURCE, thread: `dingtalk:${GROUP}` } })
+      threads: [{ source: SOURCE, id: GROUP }], channel: { source: SOURCE, thread: `dingtalk:${GROUP}` } })
     expect(trigger.channel!.address).toEqual({ conversationId: GROUP, peerOpenId: PEER, messageId: 'mid_2' })
   })
-  it('keeps a conversation in one episode for ten minutes, opens a new one after the gap, and continues from a quoted message', () => {
+  it('keeps every message of one conversation on one Thread, however long the gap, and chains a quote onto its root', () => {
     const state = threads()
     const first = dingtalkTrigger(event('mid_1'), SELF, state)!
-    // Half a minute later: the same episode.
+    // Half a minute later: the same Thread, still chained onto the first message's root.
     const second = dingtalkTrigger(event('mid_2', { timestamp: Date.parse('2026-11-02T02:00:30Z') }), SELF, state)!
     expect(second.threads[0]!.id).toBe(first.threads[0]!.id)
     expect(second.meta.rootId).toBe('mid_1')
-    // Far longer than the gap: a new episode, rooted at that message.
-    const later = dingtalkTrigger(event('mid_3', { timestamp: Date.parse('2026-11-02T02:30:00Z') }), SELF, state)!
+    // Hours later: still the conversation's Thread, though the reply chain starts afresh.
+    const later = dingtalkTrigger(event('mid_3', { timestamp: Date.parse('2026-11-02T18:30:00Z') }), SELF, state)!
+    expect(later.threads[0]!.id).toBe(first.threads[0]!.id)
     expect(later.meta.rootId).toBe('mid_3')
     expect(EPISODE_GAP_MS).toBe(600_000)
-    // A quote wins over the episode: it continues the quoted message's episode, and `repliesTo` names that Trigger.
-    dingtalkTrigger(event('mid_4', { timestamp: Date.parse('2026-11-02T02:31:00Z') }), SELF, state)
-    const quoted = dingtalkTrigger(event('mid_5', { timestamp: Date.parse('2026-11-02T02:32:00Z'),
+    // A quote names the quoted message's root and parent, and `repliesTo` names that Trigger.
+    dingtalkTrigger(event('mid_4', { timestamp: Date.parse('2026-11-02T18:31:00Z') }), SELF, state)
+    const quoted = dingtalkTrigger(event('mid_5', { timestamp: Date.parse('2026-11-02T18:32:00Z'),
       quoted_message: { message_id: 'mid_1', conversation_id: CONVERSATION, content: 'the login page is broken' } }), SELF, state)!
     expect(quoted.meta).toMatchObject({ rootId: 'mid_1', parentId: 'mid_1' })
+    expect(quoted.threads[0]!.id).toBe(CONVERSATION)
     expect(dingtalkKind.repliesTo!(quoted)).toBe(dingtalkTriggerId('mid_1'))
-    // A quote the Source never saw roots the episode at the quoted message itself.
-    const unseen = dingtalkTrigger(event('mid_6', { timestamp: Date.parse('2026-11-02T02:33:00Z'),
+    // A quote the Source never saw roots the chain at the quoted message itself.
+    const unseen = dingtalkTrigger(event('mid_6', { timestamp: Date.parse('2026-11-02T18:33:00Z'),
       quoted_message: { message_id: 'mid_0' } }), SELF, state)!
     expect(unseen.meta.rootId).toBe('mid_0')
   })
@@ -337,8 +340,8 @@ describe('dingtalk loops', () => {
     expect(health.dingtalk).toMatchObject({ state: 'ready', detail: 'Listening for direct and group messages' })
     expect(store.get(KV.dingtalk.chats)).toMatchObject({ [CONVERSATION]: { peerOpenId: PEER, direct: true },
       [GROUP]: { peerOpenId: PEER, direct: false } })
-    // The second message continues the first one's episode, in its own conversation thread.
-    expect(store.triggers.get(dingtalkTriggerId('mid_2'))!.threads[0]!.id).toBe(`${GROUP}:mid_2`)
+    // The second message lands on its conversation's Thread, the same one whatever the reply chain.
+    expect(store.triggers.get(dingtalkTriggerId('mid_2'))!.threads[0]!.id).toBe(GROUP)
     controller.abort(); await running
     // Stopping closes stdin and sends SIGTERM, so nothing keeps the CLI's event bus open.
     expect(existsSync(join(dir, 'pid'))).toBe(true)

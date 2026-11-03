@@ -7,6 +7,7 @@ import { KV } from '../kv.ts'
 import type { DingtalkAccount } from '../deployment.ts'
 import { dingtalkThreadId, dingtalkTrigger, historyEvent, historyMessages, HistoricalMessageSchema, localTime, SOURCE,
   type DingtalkEvent, type DingtalkThreads } from './dingtalk-trigger.ts'
+import { enrichActorName } from './dingtalk-names.ts'
 import { health, type SourceContext } from './host.ts'
 import { addReaction, CARD_LIMIT_MS, finishCards, sweepReactions } from './dingtalk-channel.ts'
 import type { DingtalkConfig } from './dingtalk.ts'
@@ -124,8 +125,8 @@ async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
       // Events already read when the Source is disabled are dropped; the consumer stops shortly after.
       if (!enabled(ctx)) return
       rememberChat(ctx, step)
-      const trigger = dingtalkTrigger(step, account(ctx).openDingtalkId, threadsOf(ctx))
-      if (trigger) await receive(ctx, trigger)
+      const built = dingtalkTrigger(step, account(ctx).openDingtalkId, threadsOf(ctx))
+      if (built) await receive(ctx, await enrichActorName(ctx.commands, ctx.state, built))
     }).catch(error => { ctx.report('dingtalk', { state: 'error', detail: String(error) }) })
   })
   try {
@@ -197,10 +198,10 @@ export async function backfillChat(ctx: SourceContext, config: DingtalkConfig, c
     const parsed = HistoricalMessageSchema.safeParse(item)
     if (!parsed.success) continue
     const step = historyEvent(parsed.data, conversationId, chat.direct)
-    const trigger = dingtalkTrigger(step, account(ctx).openDingtalkId, threads)
-    if (!trigger) continue
+    const built = dingtalkTrigger(step, account(ctx).openDingtalkId, threads)
+    if (!built) continue
     // A listed group message names no mention; admit it only where the Source listens to the whole chat.
     if (!chat.direct && !config.chats.some(entry => entry.conversationId === conversationId)) continue
-    await receive(ctx, trigger)
+    await receive(ctx, await enrichActorName(ctx.commands, ctx.state, built))
   }
 }

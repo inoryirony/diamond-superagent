@@ -95,8 +95,9 @@ Callers receive only their role's `Pick` of the Engine: `EngineForSources`, `Eng
 
 The Engine keeps batching, authorization, fan-out, resume and attention lifecycle rules private. Several shared predicates make these rules consistent:
 
-- `waitsForPerson` (`src/core/model.ts`): the latest Assignment reported `blocked` or `failed`, and no human message has arrived since. Automatic Inputs and failed launches remain held while this is true.
-- `followupOwners`: the Tickets still responsible for a human follow-up received on their own Threads. A Ticket can be live or ended without a human stop and waiting to resume. Handing back the message ends that ownership.
+- `waitsForPerson` (`src/core/model.ts`): the latest Assignment reported `blocked` or `failed`, and no human message has arrived since. Automatic Inputs and failed launches remain held while this is true. A hold is not this wait: it locks the Inputs it names, and the rest of the Ticket carries on.
+- `holdsInput` (`src/core/model.ts`): an open hold locks an Input while it names it, or names none and so holds the whole Ticket. The Input waits until `release` settles the conflict.
+- `followupOwners`: the Tickets still responsible for a human follow-up received on their own Threads. A Ticket can be live or ended without a human stop and waiting to resume. Handing back the message ends that ownership. Its `underEval` option keeps the owner visible while an Eval holds the message, because every person's message is now queued for one and the main Session reads it as a candidate.
 - `settled`: a Decision resolved the request; stop, unavailable, routed and refused-stop Decisions do not count.
 - `ticketStage` (`src/core/stage.ts`): implements the stage table in [003 Execution](003-execution.md).
 
@@ -287,6 +288,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 - Outbox applies the Feishu chat word limit.
 - `src/app/links.ts` resolves Feishu message links and `repliedTo`. It and Runtime read settings with `feishuSettings`.
 - `src/app/resources.ts` reads the `feishu/` and `github/` originals; `src/app/cards.ts` uses `pullOf` for Ticket cards.
+- `lanes` and `lane/<key>` in `src/app/resources.ts` are the main Session's read across lanes, whatever Source each lane is; `storeReads.lanes` lists every Thread with activity, not only the subscribed ones.
 - Runtime sends `pullEndNotices` for merged or closed Tickets.
 - Executor tools bind reported pull requests with `readPull` and `claimPull`, using the GitHub context exposed by Runtime.
 - MasterAssessor reads repository files with `readRepositoryPath`.
@@ -306,13 +308,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/limits.ts` | The limits of the values a person sets, which the settings schemas check and the panel's fields offer |
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
-| `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
+| `src/core/model.ts` | The domain types, among them the typed Ticket, its `Hold` and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `holdsInput`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
 | `src/core/ports.ts` | The ports: `Repositories`, `Policy`, `SourceScope`, `Assessor`, `Executor`, `Outbox`, and the domain events |
 | `src/core/engine.ts` | The Engine, the core's entry point, and the role interfaces `EngineForSources`, `EngineForMainSession`, `EngineForPeople`, `EngineForSettings` and `EngineForExecutor` |
 | `src/core/part.ts` | `EnginePart`, the base of the Engine's parts, and `EngineOptions` |
 | `src/core/intake.ts` | `Intake`: Triggers from Sources, to their Tickets and, unless a person's message reached one, to Eval |
 | `src/core/evals.ts` | `Evals`: the Evals of Threads and their Decisions |
-| `src/core/tickets.ts` | `Tickets`: the Ticket lifecycle, the Threads a Ticket follows, Subscriptions and Inputs |
+| `src/core/tickets.ts` | `Tickets`: the Ticket lifecycle, the Threads a Ticket follows, Subscriptions, Inputs, and a hold on the Inputs a conflict is about |
 | `src/core/assignments.ts` | `Assignments`: the Executor's facts and its workers' Reports |
 | `src/core/reviews.ts` | `Reviews`: the reviews of a ticket's result, their rounds and verdicts |
 | `src/core/replies.ts` | `Replies`: the Engine's Channel writes |
@@ -329,7 +331,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
+| `src/app/migration.ts` | The schema 12 migration: schema 10 to 11, then `mergeConversationThreads`, which folds DingTalk episode Threads into one per conversation |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -390,6 +392,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/dingtalk-loops.ts` | The DingTalk loops: the `dws event consume` consumer and the history reconciliation of known conversations |
 | `src/sources/dingtalk-channel.ts` | The DingTalk Channel: a direct or an addressed group message as the operator, always `sent`; the working reaction, and the streaming card an acknowledgement opens and the reply of its thread finishes |
 | `src/sources/dingtalk-read.ts` | The `dingtalk/` reads of a Trigger's episode, root and parent, and `dingtalkThreadContext` |
+| `src/sources/dingtalk-names.ts` | DingTalk display names: a sender's nick resolved through `dws contact user search` to 花名（真名）, cached in the KV, enriching each Trigger's meta and the history transcript |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/sources/jira.ts` | The Jira kind and plugin entry, exported as `./jira-watch`: projects, the Issues and comments they receive, their Channel and `jira/` reads |
@@ -439,6 +442,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/dingtalk.spec.ts` | The DingTalk Source: events as Triggers, episodes and the noise gate, the operator's own messages, the replies it sends, its Policy, its reads, and the consumer with the history recovery |
+| `tests/dingtalk-names.spec.ts` | DingTalk display names: 花名（真名） resolution, its KV cache and the cached nobody, trigger enrichment, and telling the operator apart |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
@@ -519,7 +523,7 @@ Read caches use bounded in-memory `TextCache` instances and are lost on restart.
 
 Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
-`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
+`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of schema 10 by both steps and one of schema 11 by the conversation merge, once, at start, and refuses an older one.
 
 ## Model-facing interfaces
 

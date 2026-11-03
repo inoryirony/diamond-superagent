@@ -5,7 +5,7 @@ import { latestAssignment, pendingReview, waitsForPerson, type Ticket } from './
  * High-level execution stage of a ticket: waiting on a person, its result under review, actively working or queued, idle
  * between turns, or ended.
  */
-export type TicketStage = { stage: 'person'; action: 'delivery' | 'answer' | 'review' | 'returned' | 'blocked' | 'failed' }
+export type TicketStage = { stage: 'person'; action: 'delivery' | 'answer' | 'review' | 'returned' | 'blocked' | 'failed' | 'held' }
   | { stage: 'review'; action: 'running' } | { stage: 'working'; action?: 'queued' } | { stage: 'idle' } | { stage: 'ended' }
 
 /**
@@ -15,6 +15,8 @@ export type TicketStage = { stage: 'person'; action: 'delivery' | 'answer' | 're
  */
 export function ticketStage(ticket: Ticket, reviewing = false): TicketStage {
   if (ticket.ended) return { stage: 'ended' }
+  // A conflict parked until someone settles it stops the work, ahead of everything else it would otherwise do.
+  if (ticket.hold && !ticket.hold.released) return { stage: 'person', action: 'held' }
   if (ticket.delivery) return { stage: 'person', action: 'delivery' }
   if (ticket.attention) return { stage: 'person', action: 'answer' }
   if (pendingReview(ticket)) return { stage: 'review', action: 'running' }

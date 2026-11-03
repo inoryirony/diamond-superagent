@@ -8,6 +8,7 @@ Each open Ticket has one stage, determined by what it is waiting for. Read the t
 
 | Stage | Condition | Panel label |
 | --- | --- | --- |
+| person / held | An open hold names no Input, so its whole work waits on a conflict between conversations; a hold that names Inputs locks only those, and the ticket keeps its stage | Held on a conflict |
 | person / delivery | Delivering an Input to the Executor Session failed; it is retried after 2 seconds, then after a delay that doubles up to a minute, and a success, a new Assignment or the Ticket's end clears it | Input undelivered |
 | person / answer | It has an Attention | Awaiting answer |
 | review / running | A review of the latest result runs, or the result is `ready` and its first review has not started yet (`executor.reviews`) | Under review |

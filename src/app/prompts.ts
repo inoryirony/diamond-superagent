@@ -114,7 +114,10 @@ export function promptParts(config: PromptConfig, role: Role, environment?: stri
     ? [fixed('runtime/shared'), fixed('runtime/reviewer'),
       ...environment ? [{ name: 'runtime/environment', kind: 'generated' as const, key: 'runtime/environment', text: environment }] : []]
     : [fixed('runtime/shared'), fixed(`runtime/${role}`),
-      ...TEAM_SECTIONS.map(team),
+      // Team sections describe work a Session does itself. The main Session routes rather than builds and delivers, so the PR
+      // delivery requirements and the scope rules for its own edits belong to the worker; both still speak to people, so
+      // Communication stays.
+      ...TEAM_SECTIONS.filter(name => role === 'worker' || name === 'communication').map(team),
       ...['subscriptions', 'replies', role === 'orchestrator' ? 'dispatch' : 'work'].map(name => fixed(`runtime/${name}`)),
       ...role === 'orchestrator' ? [fixed('runtime/admission')] : [],
       fixed('runtime/handoff', `runtime/handoff/${role}`),

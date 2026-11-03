@@ -129,6 +129,11 @@ export function ExecutionSettings() {
             <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false} pattern="/.*"
               onChange={event => edit({ directory: event.target.value })} />
           </Field>
+          <Field label={t('executionWorkspace')} hint={t('executionWorkspaceHint')} note={value.workspace ? undefined
+            : t('executionWorkspaceDefault', { root: environment.root })}>
+            <Input className="dt-mono" value={value.workspace} placeholder={t('executionWorkspaceEmpty')} spellCheck={false} pattern="/.*"
+              onChange={event => edit({ workspace: event.target.value })} />
+          </Field>
           <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>
             <textarea ref={prepare} className="dt-textarea dt-mono" rows={3} maxLength={LIMITS.prepareCommand} spellCheck={false}
               placeholder={t('prepareCommandEmpty')} value={value.prepare}

@@ -62,8 +62,13 @@ export async function candidateCard(host: LinkHost, candidate: Candidate) {
     .map(item => ({ trigger_id: trigger.id, ticket_id: item.ticketId, reason: item.reason })))
   // Format the primary trigger like a worker input (including the message it replies to) and summarize earlier batch triggers as cards.
   const others = candidate.triggers.filter(trigger => trigger.id !== primary.id)
+  // The tickets this conversation already reaches, so a message on a lane a ticket follows reads as that ticket's business even
+  // before its worker took it up; a lane with none is new ground.
+  const onLane = candidate.thread.subscriptions.flatMap(id => { const ticket = host.store.tickets.get(id); return ticket ? [ticketCard(ticket)] : [] })
   return { ...triggerMessage(primary, await sourceLink(host, primary), undefined, repliedTo(host, primary)), strength: candidate.strength,
-    mode: settings.eval.mode, ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
+    mode: settings.eval.mode, lane: candidate.thread.key, board_seq: candidate.boardSeq,
+    lane_tickets: onLane.map(ticket => ({ ticket_id: ticket.ticket_id, title: ticket.title, state: ticket.state })),
+    ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
     ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(candidate.tickets),
     ...(delivered.length ? { delivered_to: delivered } : {}), ...(referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {}),
     next_action: candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'
