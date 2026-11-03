@@ -132,6 +132,9 @@ export class Assignments extends EnginePart {
     // With reviews on, a ready result is judged before the ticket delivers or ends it: the review then passes it on as the
     // report would have, or returns it to the worker with findings.
     if (report.state === 'ready' && this.reviews?.required(ticket)) {
+      // A second ready report from the same Assignment supersedes the review the first one started: that review judged a
+      // result this report replaced, so leaving it running would park it unfinished with nobody left to end it.
+      this.reviews.supersede(ticket, assignment.id)
       this.reviews.start(ticket, assignment); return this.require(ticketId)
     }
     // A ticket that follows Threads ends with them: a ready report ends it only once followsDone holds, with that outcome.

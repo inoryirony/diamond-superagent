@@ -128,3 +128,24 @@ it('leaves the verify block out of the opening message when the verify phase is 
     expect(JSON.parse(opening!.text)).not.toHaveProperty('verify')
   }, { timeout: 5000 })
 })
+
+it('reviews a result once, and supersedes an earlier review left running when the same worker reports again', async () => {
+  h = await startRuntime()
+  const host = h
+  const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  await host.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'First result.' })
+  await settle(host, ticket.id)
+  expect(ticketOf(host, ticket.id).reviews).toHaveLength(1)
+  // The worker reports again before the reviewer finished. Without superseding, the first review would stay open forever and
+  // the second report would either reuse it or start a duplicate.
+  await host.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Second result, superseding the first.' })
+  await host.runtime.idle()
+  const reviews = ticketOf(host, ticket.id).reviews!
+  expect(reviews).toHaveLength(2)
+  expect(reviews[0]!.ended).toMatchObject({ unfinished: true })
+  expect(reviews[0]!.ended!.summary).toContain('superseded')
+  expect(reviews[1]!.ended).toBeUndefined()
+  // One verdict settles the ticket; nothing else is left waiting.
+  await host.finishReview(ticket.id)
+  await vi.waitFor(() => expect(ticketOf(host, ticket.id).ended).toMatchObject({ outcome: 'completed' }))
+})

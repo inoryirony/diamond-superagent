@@ -33,6 +33,23 @@ export class Reviews extends EnginePart {
     const wanted = reviewRequired(ticket, true, REVIEW_ROUNDS)
     return on && wanted
   }
+  /**
+   * Ends any review still running on `assignment`'s earlier result, for a newer report that replaces it. The worker revised
+   * and reported again before the reviewer finished, so that review judged a result nobody will deliver; leaving it open
+   * would keep it `unfinished` for a person forever. It ends as unfinished, naming why, and the new report gets its own review.
+   */
+  supersede(ticket: Ticket, assignmentId: string): void {
+    const stale = (ticket.reviews ?? []).filter(review => review.assignmentId === assignmentId && !review.ended)
+    if (!stale.length) return
+    const at = this.now()
+    for (const review of stale) {
+      review.ended = { at, outcome: 'passed', unfinished: true,
+        summary: `Review ${review.round} was superseded: the worker reported a newer result before this review finished, so this one judged a result the ticket no longer has.` }
+      this.reviewer.stopReview(ticket, `review ${review.round} superseded by a newer result`)
+    }
+    ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+  }
   /** Record that `assignment`'s ready result goes to review round `round` and queue the review. */
   start(ticket: Ticket, assignment: Assignment): void {
     const round = reviewRound(ticket)

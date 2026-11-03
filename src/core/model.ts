@@ -361,7 +361,9 @@ export const reviewRequired = (ticket: Pick<Ticket, 'reviews' | 'assignments'>, 
   if (!reviews) return false
   const report = latestReport(ticket)
   if (!report) return false
-  const reviewed = (ticket.reviews ?? []).some(review => review.at > report.at)
+  // A review already asked for by this exact result runs or ran: `>=` because a review recorded in the same millisecond as
+  // the report is a review of that report, not one that predates it.
+  const reviewed = (ticket.reviews ?? []).some(review => review.at >= report.at)
   return !reviewed && reviewsInAttempt(ticket) < rounds
 }
 /** The Assignment the ticket is on now: the newest one, whose result a review of the current work judges. */
