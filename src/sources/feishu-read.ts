@@ -151,6 +151,7 @@ function sourceRef(trigger: Trigger): FeishuRef {
   return ref
 }
 export const feishuThreadContext: ThreadContext<{ readPageSize: number }> = {
+  chat: true,
   messageId: trigger => String(trigger.meta.messageId ?? ''),
   read: async (commands, trigger, part, cursor, config) => {
     const ref = sourceRef(trigger)

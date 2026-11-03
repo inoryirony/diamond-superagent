@@ -67,6 +67,8 @@ export type ContextPartName = 'thread' | 'root' | 'parent'
 export interface ContextPart { messages: ContextMessage[]; next?: string | undefined; body: Record<string, unknown>; status?: string }
 /** Bounded thread context reader used by assessments to inspect messages and images around a trigger. */
 export interface ThreadContext<C> {
+  /** Set when the Thread is a conversation of people, such as a chat, where the earlier messages say what a short one follows; an issue's thread is not. */
+  chat?: true
   /** The ID of the Trigger's own message among the messages of its Thread. */
   messageId(trigger: Trigger): string
   /** Reads a page of thread messages (`thread`, first page when `cursor` is omitted), the topic root (`root`), or the replied-to message (`parent`). */
@@ -78,6 +80,8 @@ export interface ThreadContext<C> {
     signal: AbortSignal): Promise<unknown>
 }
 export interface TriggerContext {
+  /** Whether the Thread is a conversation of people, as `ThreadContext.chat` says. */
+  readonly chat?: true
   readonly messageId: string
   read(commands: Commands, part: ContextPartName, cursor?: string): Promise<ContextPart>
   images(text: string): string[]

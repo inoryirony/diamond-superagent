@@ -1,6 +1,6 @@
 /** Serves paginated context resources to orchestrator_read so large bodies stay out of model prompts until requested. */
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { UserError, key, latestReport, reached, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
+import { UserError, key, latestReport, reached, reportHistory, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
 import { batchOf, inputMessage, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { readGithub } from '../sources/github-read.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
@@ -9,6 +9,7 @@ import { feishuTriggerId } from '../sources/feishu-trigger.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
+import { deskLine } from './desk.ts'
 import { transcriptEntry } from './context.ts'
 import { builtInParts, defaultPrompts } from './prompts.ts'
 import type { Context } from '@deepseek-ai/cordis'
@@ -19,10 +20,12 @@ import type { Settings } from './settings.ts'
 import { KV } from '../kv.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
+import type { TriggerContext } from '../sources/kind.ts'
 
 /** Resource descriptors exposed via orchestrator_read, marking which resources worker sessions may also read for their own ticket. */
 export const RESOURCES: readonly { name: string; holds: string; executor?: true }[] = [
   { name: 'tickets', holds: 'ticket cards, newest first; a card\'s state is person/review after a ready report, person/blocked or person/failed after those reports, person/answer with a question, person/delivery when an input could not reach the worker, working or working/queued while it works, idle once the worker ended its turn without a report, else how the ticket ended' },
+  { name: 'desk', holds: 'open tickets, one line each: its state, when it last showed life, whether it is overdue or unreviewed, and its last report' },
   { name: 'triggers', holds: 'trigger cards with where each went, newest first' },
   { name: 'threads', holds: 'subscribed threads, newest activity first, with their labels, tickets, current assessment and polling errors' },
   { name: 'thread/<key>', holds: 'one thread: its label and link, its tickets and latest decisions, and its triggers, newest first', executor: true },
@@ -38,7 +41,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'ticket/<id>/transcript', holds: 'its Executor Session\'s messages, newest first', executor: true },
   { name: 'ticket/<id>/message/<n>', holds: 'one message of that transcript', executor: true },
   { name: 'ticket/<id>/input/<id>', holds: 'one input it was delivered', executor: true },
-  { name: 'trigger/<id>', holds: 'a trigger\'s text, where it went, the message it replies to and the messages around it on its thread',
+  { name: 'trigger/<id>', holds: 'a trigger\'s text, where it went, the message it replies to, the messages around it on its thread and its live history',
     executor: true },
   { name: 'settings', holds: 'settings by block, each with the revision a save names: the small blocks whole, the Policy and the Source '
     + 'instances summarized' },
@@ -68,6 +71,8 @@ export interface ResourceHost {
   mayRead(sessionId: string, revision: number): boolean
   feishuPageSize(): number
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
+  /** Reader of the conversation `trigger` was written in, or undefined when its Source keeps none. */
+  threadContext(trigger: Trigger): TriggerContext | undefined
 }
 export interface MainResourceHost extends ResourceHost {
   readonly sessions: Pick<Sessions, 'status' | 'modelRetry'>
@@ -115,11 +120,42 @@ async function transcript(host: ResourceHost, ticketId: string) {
   return (await host.context.sessionController.inspect(workerSessionId(ticketId) as SessionId)).events
 }
 
+/** How many messages before a trigger its live history shows, and how much of each. */
+const HISTORY = 20, HISTORY_CHARS = 400
+/**
+ * The latest messages of the conversation a trigger was written in, read live from its Source: the store holds only what arrived
+ * after subscription, so the first direct message of a conversation has no neighbours there. A failed read is reported in place of
+ * the history instead of failing the whole resource, and is not cached, so the next read tries again.
+ */
+async function liveHistory({ host, sessionId, signal }: Read, found: Trigger) {
+  const context = host.threadContext(found)
+  // An issue tracker's thread is its own history; only a conversation of people needs one read live.
+  if (!context?.chat) return undefined
+  const cacheKey = `${sessionId}:history:${found.id}`
+  const cached = host.pages.get(cacheKey)
+  if (cached !== undefined) return JSON.parse(cached)
+  try {
+    const { messages } = await context.read(host.commands.withSignal(signal), 'thread')
+    const triggered = Date.parse(found.at)
+    // The reader's page also holds the trigger itself and what came after it.
+    const history = messages.filter(message => !message.deleted && message.id !== context.messageId && !(Date.parse(message.at) > triggered))
+      .slice(-HISTORY).map(({ id, from, at, text }) => ({ id, from, at, text: text.slice(0, HISTORY_CHARS) }))
+    host.pages.set(cacheKey, JSON.stringify(history))
+    return history
+  } catch (error) {
+    return { status: 'unavailable', error: (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200) }
+  }
+}
+
 const ROUTES: readonly Route[] = [
   ['tickets', read => {
     const host = main(read), tickets = host.store.tickets.list()
     const card = (ticket: Ticket) => ({ ...ticketCard(ticket), ...host.sessions.modelRetry(runningAssignment(ticket) && workerSessionId(ticket.id)) })
     return list(read, (offset, count) => tickets.slice(offset, offset + count).map(card))
+  }],
+  ['desk', read => {
+    const { store } = main(read), now = new Date().toISOString(), reviewing = store.settings().executor.reviews
+    return { items: store.tickets.open().map(ticket => deskLine(ticket, now, reviewing)), next_offset: null }
   }],
   ['triggers', read => {
     const { store } = main(read)
@@ -224,10 +260,13 @@ const ROUTES: readonly Route[] = [
     const repliedTo = shown(parent ? host.store.triggers.get(feishuTriggerId(parent)) : undefined)
     const neighbours = host.store.read.neighbours(threadKey(found.threads[0]!), found.at, found.id)
     const around = { before: shown(neighbours.before), after: shown(neighbours.after) }
+    // Only the main Session reads the live conversation: a worker may not see messages its ticket did not reach.
+    const history = offset === 0 && !ticketId ? await liveHistory(read, found) : undefined
     return { ...card, ...await host.sourceLink(found, signal), acknowledgement: host.store.replyStatus(key('ack', found.id)) ?? 'not_requested',
       ...(ref ? { context: feishuReferences(ref) } : {}),
       ...(offset === 0 ? {
         ...repliedTo ? { replied_to: triggerLine(repliedTo) } : {},
+        ...history !== undefined ? { history } : {},
         around: { ...around.before ? { before: triggerLine(around.before) } : {}, ...around.after ? { after: triggerLine(around.after) } : {} },
       } : {}),
       ...text(read, found.text) }
@@ -274,9 +313,12 @@ const ROUTES: readonly Route[] = [
       if (!entry) throw new Error('Unknown transcript entry')
       body = JSON.stringify(entry)
     } else if (section === 'report' && part) {
-      const report = ticket.assignments.find(item => item.id === part)?.report
-      if (!report) throw new Error('Unknown assignment report')
-      body = report.summary
+      const assignment = ticket.assignments.find(item => item.id === part)
+      const report = assignment?.report
+      if (!assignment || !report) throw new Error('Unknown assignment report')
+      // The ledger's last entry carries what a ready report showed; the mirror `report` keeps only its summary.
+      const evidence = reportHistory(assignment).at(-1)?.evidence
+      body = evidence?.length ? `${report.summary}\n\nEvidence:\n${evidence.map(item => `- ${item.what}: ${item.result}`).join('\n')}` : report.summary
     } else if (part !== undefined) throw new Error('Unknown context resource')
     else if (section === 'assignment') body = ticket.execution?.assignment ?? ''
     else if (section === 'result') body = latestReport(ticket)?.summary ?? ''

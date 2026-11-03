@@ -9,6 +9,7 @@ import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssess
 import { ticketCard } from '../cards.ts'
 import { PromptConfigSchema, savePrompts, type Prompts } from '../prompts.ts'
 import { readResource, type MainResourceHost, type ResourceHost } from '../resources.ts'
+import { readConversation, toolCallsWithArguments } from '../session-actions.ts'
 import type { Sessions } from '../sessions.ts'
 import type { Settings } from '../settings.ts'
 import type { Store } from '../store.ts'
@@ -71,6 +72,20 @@ const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: r
 /** The ignore reasons dispatch names by a word; any other text is kept as said. */
 const NAMED_REASONS = ['chatter', 'duplicate'] as const
 const ignoreReason = (text: string): string | Reason => (NAMED_REASONS as readonly string[]).includes(text.trim()) ? { code: text.trim() } : text
+/**
+ * Why an attach or an answer may not run yet: the Session never read the conversation its trigger was written in. A message of
+ * two words says nothing without the sentence it follows, so the host holds the Session to the read that dispatch asks for.
+ * Only a Source that keeps a conversation to read is held; the others route as before.
+ */
+function unread(host: MainToolsHost, item: RouteItem, calls: readonly { name: string; arguments: string }[]): string | undefined {
+  if (item.kind !== 'attach' && item.kind !== 'answer') return undefined
+  const trigger = host.store.triggers.get(item.trigger_id)
+  if (!trigger || !host.resources.threadContext(trigger)?.chat) return undefined
+  const meta = trigger.meta as Record<string, unknown>
+  const text = (value: unknown) => typeof value === 'string' && value ? value : undefined
+  if (readConversation(calls, { id: trigger.id, conversationId: text(meta.conversationId), peerOpenId: text(meta.peerOpenId) })) return undefined
+  return `Read the conversation first: orchestrator_read trigger/${trigger.id} (it carries the live history) or dws chat message list on its conversation, then route again.`
+}
 /** Why an item cannot run: a field its kind needs is missing, or one it reads breaks its limit. */
 function invalid(item: RouteItem): string | undefined {
   for (const [field, { check, reads, needs }] of Object.entries(FIELDS) as [Field, typeof FIELDS[Field]][]) {
@@ -133,17 +148,21 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
  * `orchestrator_route`: routing decisions for several triggers in one call, in order. Each runs as its own Engine command; one
  * that is refused, or fails, is answered so, and the others still run.
  */
-function routeTool(host: MainToolsHost): Tool {
+function routeTool(host: MainToolsHost, agent: Pick<Agent, 'session'>): Tool {
   return tool({
     name: 'orchestrator_route',
     description: 'Route candidates, one item each by the card\'s trigger_id, in one call: accept an explicit request as a new ticket, attach a trigger to an existing ticket, stop a ticket on a person\'s stop message, answer a question with text and no ticket, or ignore a candidate that needs no ticket, answer or stop, as dispatch says. Items run in order and each is answered on its own; a refused item leaves the others. An inferred candidate may be ignored here; accepting one goes through orchestrator_eval_decide.',
     schema: z.object({ decisions: z.array(RouteItemSchema).min(1).max(20) }).strict(),
     execute: async ({ decisions }) => {
       const decided = new Map<string, string>()
+      // The whole log counts, so a read made before this call, or by an earlier item of it, is enough.
+      const calls = toolCallsWithArguments(agent)
       const results = decisions.map(item => {
         const head = { trigger_id: item.trigger_id, kind: item.kind }
         const problem = invalid(item)
         if (problem) return { ...head, refused: problem }
+        const held = unread(host, item, calls)
+        if (held) return { ...head, refused: held }
         try {
           const result = route(host, item, decided)
           if ('refused' in result) return { ...head, ...result }
@@ -169,7 +188,7 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
   return [
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, { sessionId: agent.id }, signal)),
-    routeTool(host),
+    routeTool(host, agent),
     tool({
       name: 'orchestrator_ticket_restart',
       description: 'Start a fresh assignment on a ticket whose review rounds are spent, with an instruction that names what the reviewer '

@@ -77,6 +77,7 @@ async function readOne(commands: Commands, ref: DingtalkAddress & { at: string }
   return { messages, body: { status: messages.length ? 'available' : 'unavailable', messages }, status: messages.length ? 'available' : 'unavailable' }
 }
 export const dingtalkThreadContext: ThreadContext<{ readPageSize: number }> = {
+  chat: true,
   messageId: trigger => String(trigger.meta.messageId ?? ''),
   read: async (commands, trigger, part: ContextPartName, cursor, config) => {
     const ref = address(trigger)

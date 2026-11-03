@@ -121,6 +121,7 @@ export class SourceRegistry implements SourceScope {
     if (!kind || !context) return undefined
     const { config } = this.resolve(kind, settings.sources[kind.kind])
     return {
+      ...context.chat ? { chat: true as const } : {},
       messageId: context.messageId(trigger),
       read: (commands, part, cursor) => context.read(commands, trigger, part, cursor, config),
       images: text => context.images?.(text) ?? [],

@@ -8,9 +8,11 @@ A question, or a request to explain, check data, logs or a status, is answered, 
 When the operator himself wrote in the conversation after the question, do not answer on top of him; his words instruct any ticket on that thread.
 Greetings, thanks, stickers, bare acknowledgements and small talk get no reply and no ticket: ignore with reason chatter.
 Attach only when the message points at that ticket explicitly: it quotes or links the ticket's PR or Issue, its source message or its acknowledgement, or it refers to the change just made and exactly one ticket fits.
-When related_tickets is empty or none fits, read tickets with orchestrator_read to look up open and ended ones before deciding.
+Before you attach or answer a message from a private chat or a group, read its conversation history, which the trigger read carries live, and attach only on evidence there that it points at that ticket.
+A follow-up of two or three words continues the sentence before it: find that sentence, with dws if unclear, never from the ticket list.
+When related_tickets is empty or none fits, read tickets with orchestrator_read, open and ended, and the other conversations on the subject with dws, before deciding.
 A message on a similar subject is a new request: accept or ignore it, never attach it.
-When an open ticket already covers the same change, attach when the message points at it, otherwise ignore with reason duplicate; never open a second ticket for the same change.
+When an open ticket already covers the same change, attach when the message points at it or both conversations plainly describe that change; otherwise ignore with reason duplicate; never open a second ticket for the same change.
 A duplicate ticket can be closed; a wrong attachment subscribes the ticket to the whole thread and stays.
 Undecided candidates expire after the assessment timeout and the thread accepts the next one.
 When several candidates are waiting, decide those whose card already settles them in one orchestrator_route call, one item each; read context or run orchestrator_eval first only for those that need it, and send those calls alongside it.
