@@ -148,6 +148,15 @@ export class Reviewers implements ReviewerPort, ReviewerSessions {
   resume(): void {
     for (const ticket of this.host.store.tickets.open()) {
       const review = pendingReview(ticket)
+      // A pending review whose result a later report replaced can never be judged and would keep the ticket waiting: nothing
+      // would ever end it, and its round is already behind. Older versions of this code could leave one behind, so a restart
+      // closes it here before resuming what is still legitimate.
+      if (review && ticket.assignments.at(-1)?.report && review.at < (ticket.assignments.at(-1)!.report!.at)) {
+        this.host.store.atomic(() => this.host.engine.reviewEnded(ticket.id,
+          { outcome: 'passed', unfinished: true,
+            summary: `Review ${review.round} was superseded: a newer report replaced the result it judged.` }))
+        continue
+      }
       if (review) this.review({ ticketId: ticket.id, assignmentId: review.assignmentId, round: review.round })
     }
   }

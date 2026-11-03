@@ -149,3 +149,23 @@ it('reviews a result once, and supersedes an earlier review left running when th
   await host.finishReview(ticket.id)
   await vi.waitFor(() => expect(ticketOf(host, ticket.id).ended).toMatchObject({ outcome: 'completed' }))
 })
+
+it('closes a review a newer report superseded when the host resumes, instead of waiting on it forever', async () => {
+  h = await startRuntime()
+  const host = h
+  const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  await host.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Result.' })
+  await settle(host, ticket.id)
+  // Simulate what an older build left behind: the review stays open while the worker reports a newer result.
+  const store = host.runtime.store
+  store.atomic(() => {
+    const t = store.tickets.get(ticket.id)!
+    const assignment = t.assignments.at(-1)!
+    assignment.report = { state: 'ready', summary: 'Replacement result.', at: new Date(Date.now() + 1000).toISOString() }
+    store.tickets.save(t)
+  })
+  host.runtime.reviewers.resume()
+  await host.runtime.idle()
+  expect(ticketOf(host, ticket.id).reviews![0]!.ended).toMatchObject({ unfinished: true })
+  expect(ticketOf(host, ticket.id).reviews![0]!.ended!.summary).toContain('superseded')
+})
