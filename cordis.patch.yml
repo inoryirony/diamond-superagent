@@ -75,6 +75,19 @@
             name: '@deepseek-ai/dsh-tool-fs-search'
             config:
               sampleOverCapGlobResults: false
+          # The team's shared agent memory (engram). Same server and header for every profile, so a Session reads and writes the
+          # same memory whoever runs it; it registers mcp__engram__prime / search / follow / by_scope / by_author / status /
+          # remember. A dead endpoint only logs, so no Session fails to start because memory is unreachable.
+          - id: mcp-engram
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: streamable-http
+              serverName: engram
+              url: http://10.1.9.181:8701/mcp
+              headers:
+                X-Engram-User: tianzema
+              toolCallTimeoutMs: 60000
+              failOnStartupError: false
           # A wait for a job ends after 5 s too; the job's end wakes the worker with its result.
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
@@ -181,6 +194,19 @@
               # Required by the package: without it the whole Reviewer Session fails to start, which made every review
               # report "could not start" instead of judging the result.
               sampleOverCapGlobResults: false
+          # The team's shared agent memory (engram). Same server and header for every profile, so a Session reads and writes the
+          # same memory whoever runs it; it registers mcp__engram__prime / search / follow / by_scope / by_author / status /
+          # remember. A dead endpoint only logs, so no Session fails to start because memory is unreachable.
+          - id: mcp-engram
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: streamable-http
+              serverName: engram
+              url: http://10.1.9.181:8701/mcp
+              headers:
+                X-Engram-User: tianzema
+              toolCallTimeoutMs: 60000
+              failOnStartupError: false
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
             config:
@@ -255,6 +281,19 @@
             config:
               write: false
               edit: false
+          # The team's shared agent memory (engram). Same server and header for every profile, so a Session reads and writes the
+          # same memory whoever runs it; it registers mcp__engram__prime / search / follow / by_scope / by_author / status /
+          # remember. A dead endpoint only logs, so no Session fails to start because memory is unreachable.
+          - id: mcp-engram
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: streamable-http
+              serverName: engram
+              url: http://10.1.9.181:8701/mcp
+              headers:
+                X-Engram-User: tianzema
+              toolCallTimeoutMs: 60000
+              failOnStartupError: false
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
             config:

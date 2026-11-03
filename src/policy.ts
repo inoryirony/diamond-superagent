@@ -208,7 +208,12 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
     gate(trigger: Trigger, thread, tickets) {
       if (!trigger.human) return machineGate(trigger)
-      const allowed = allowedSender(settings, trigger.actor)
+      // The operator's own messages are admitted like a listed sender's: the Source marks them `meta.operator` because the
+      // account typed them itself, and requiring the operator's name on the member list made every message he wrote to a
+      // listed contact a `not_a_member` that the main Session then ignored.
+      const listed = allowedSender(settings, trigger.actor)
+      const operator = trigger.meta.operator === true
+      const allowed = listed ?? (operator ? { id: trigger.actor.id, ...(typeof trigger.meta.sender === 'string' ? { name: trigger.meta.sender } : {}) } : undefined)
       const scope = listened(sources, trigger.source, trigger.meta)
       const row = scope.listened ? scope.row : undefined
       const recorded = { source: trigger.source, scope: trigger.meta, ...row === undefined ? {} : { row }, ...allowed ? { sender: senderName(allowed) } : {} }

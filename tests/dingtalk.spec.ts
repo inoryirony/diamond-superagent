@@ -237,6 +237,15 @@ describe('dingtalk policy', () => {
   it('refuses a sender who is not on the allowed list, even though the Source heard the message', () => {
     expect(policy.gate(trigger('Oo_stranger_000000000000000000000'), thread, [])).toEqual({ admissible: false, reason: 'not_a_member' })
   })
+  it('admits the operator\'s own message to a listed contact, though the operator is not on the allowed list', () => {
+    // The Source marks a message the account typed itself `meta.operator`; requiring its own name on the member list made
+    // every message the operator wrote to a listed contact a `not_a_member` the main Session then ignored.
+    const base = trigger(PEER)
+    const own = { ...base, actor: { source: SOURCE, id: 'Oo_self_operator' },
+      meta: { ...base.meta, operator: true, sender: 'Operator' } }
+    expect(policy.gate(own, thread, [])).toMatchObject({ admissible: true, strength: 'explicit',
+      basis: { via: 'addressed', source: SOURCE, sender: 'Operator', addressed: 'direct' } })
+  })
   it('listens to a configured group and to direct messages, and to an unlisted group only while other chats are received', () => {
     expect(registry.scope({ source: SOURCE, meta: { conversationId: CONVERSATION, direct: true } }))
       .toEqual({ listened: true, observed: false, row: 'direct' })
