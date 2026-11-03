@@ -42,6 +42,14 @@ is not yet checked.
 
 There are three questions, in this order. Answer all three before you decide.
 
+Before any of them: every symbol you name must come from a file you read in this turn. A function, constant, error code or line number you
+remember from training is not evidence — it may not exist in this repository at all. Search for it first (`rg -n '<name>'`), and if it is not
+there, either drop the claim or say plainly that you could not find it. A finding built on an identifier that does not exist sends the worker
+chasing nothing, and is worse than no finding.
+
+The same holds for the round you are in and the state of the ticket: the message that opened this Session states them, and your reading of
+`inputs` is history that may be out of date. Quote the round from that message, not from an input.
+
 1. Is it what was asked? Compare the delivered change with the original request and the repository's instructions (AGENTS.md, docs, the ticket's
    referenced documents). A result that solves something else, or only part of it, goes back.
 2. Is it correct? Read the diff. Look for the case that breaks it, the caller it missed, the path that was not updated, the input it does not handle,
