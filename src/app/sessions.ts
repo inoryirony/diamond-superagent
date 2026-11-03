@@ -13,6 +13,7 @@ import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
+import { deskSummary } from './desk.ts'
 import { initializeRoleModel } from './role-models.ts'
 import { bundledSkills } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
@@ -62,16 +63,14 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 /**
- * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list and
- * subagents. It gets no other tool the profile has, whenever it was registered: none that asks or shows a person something,
+ * The one capability surface of every role, the main Session, an Executor Session and a Reviewer Session: what differs between
+ * them is what they are for, not what they can run. It is files, search, the shell and its jobs, the web, skills, the todo list and
+ * subagents. No role gets any other tool the profile has, whenever it was registered: none that asks or shows a person something,
  * changes the profile, schedules work or starts goals outside the worker slots, the pause and a person's hold, starts or
  * messages other Sessions, or edits documents.
  */
-const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
+export const SESSION_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
   'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
-/** A Reviewer Session's tools: what reads the code and runs its checks, and nothing that changes the repository. */
-const REVIEW_TOOLS = ['read', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search', 'web_fetch', 'skill',
-  'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents']
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'
@@ -262,7 +261,9 @@ export class Sessions {
       const version = this.promptFor(agent, context.signal !== undefined)
       const current = ticket && host.store.tickets.get(ticket.id)
       const composed = host.prompts.compose(version.config, role, current ? host.environment(current) : undefined)
-      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current && !reviewer ? mandateInstructions(current.mandate) : ''}`
+      // The main Session reads the desk with every request: which open tickets wait, and for how long, without a read of its own.
+      const desk = agent.id === host.masterId ? deskSummary(host.store.tickets.open(), new Date().toISOString(), host.store.settings().executor.reviews) : ''
+      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current && !reviewer ? mandateInstructions(current.mandate) : ''}${desk ? `\n${desk}` : ''}`
     }, ...(master ? { complete: true } : {}) }))
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
     const skillScope = agent.ctx.inject(['skills'], scope => {
@@ -277,11 +278,11 @@ export class Sessions {
     const register = this.registerTool(agent, binding)
     for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
     if (master) {
-      binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: this.allowed(agent) }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
     } else if (reviewer) {
-      // A reviewer reads and runs checks, and changes nothing: the code it judged must stay the code that ships.
-      binding.disposers.push(agent.ctx.tools.restrict({ allow: REVIEW_TOOLS.filter(name => agent.ctx.tools.get(name, scopeParentOf(agent))) }))
+      // A reviewer has the same tools as a worker: a review that changes the code it judged is voided afterwards (see `Reviewers`).
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: this.allowed(agent) }))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
       binding.disposers.push(...this.workOnly(agent, ticket!.id))
@@ -301,6 +302,14 @@ export class Sessions {
     } catch { return false }
   }
   /**
+   * The `SESSION_TOOLS` the profile registered, for any role. Read through the parent scope, which includes the preset's tools:
+   * the global view misses them, and the agent's own view includes local tools such as subagent, which restrict refuses to name.
+   */
+  private allowed(agent: Agent): string[] {
+    const parent = scopeParentOf(agent)
+    return SESSION_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
+  }
+  /**
    * An Executor Session's tools: only the profile's work tools, which DSH requires to be known, and none once its ticket
    * ended. A failed or blocked worker keeps its tools, so a person may continue it in its Session; only automated input waits
    * (see the executor). Read inherited tools through the parent scope, which includes the preset's tools. The global view
@@ -308,8 +317,7 @@ export class Sessions {
    */
   private workOnly(agent: Agent, ticketId: string): (() => void)[] {
     const store = this.host.store
-    const parent = scopeParentOf(agent)
-    const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
+    const allow = this.allowed(agent)
     return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
       const current = store.tickets.get(ticketId)
       return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined

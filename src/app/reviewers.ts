@@ -7,6 +7,7 @@ import { REVIEW_ROUNDS, liveTicket, pendingReview, type ReviewRequest, type Revi
 import { isReviewerSession, reviewerSessionId, reviewTitle } from '../executor/dsh.ts'
 import { Later, type Effects } from './effects.ts'
 import { resultRelay } from './notices.ts'
+import { audited, toolCalls } from './session-actions.ts'
 
 import type { Sessions } from './sessions.ts'
 import type { Store } from './store.ts'
@@ -182,10 +183,14 @@ export class Reviewers implements ReviewerPort, ReviewerSessions {
   private async apply(sessionId: string, report: ReviewReport): Promise<void> {
     const told = this.told.get(sessionId)
     if (!told || !this.current(told.ticketId, told.round)) return
-    const updated = this.host.store.atomic(() => this.host.engine.reviewEnded(told.ticketId, report))
-    // A result that passes its review goes to the person who asked, in the main Session, as a ready report would.
-    if (report.outcome === 'passed' && !report.unfinished && !liveTicket(updated)) {
-      const summary = updated.assignments.findLast(assignment => assignment.report)?.report?.summary ?? report.summary
+    // A Session that changed the code it judged gives no verdict on it: the verdict is recorded void, for a person to look at.
+    const agent = this.running.get(sessionId)
+    const judged = audited(report, agent ? toolCalls(agent) : [])
+    const updated = this.host.store.atomic(() => this.host.engine.reviewEnded(told.ticketId, judged))
+    const voided = !!judged.unfinished && !report.unfinished
+    // A result that passes its review goes to the person who asked, in the main Session, as a ready report would; a void verdict tells it the result waits for a person.
+    if (voided || judged.outcome === 'passed' && !judged.unfinished && !liveTicket(updated)) {
+      const summary = updated.assignments.findLast(assignment => assignment.report)?.report?.summary ?? judged.summary
       this.relayResult(updated, summary)
     }
   }
