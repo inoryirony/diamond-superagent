@@ -138,6 +138,11 @@ export interface DomainEvents {
    * to a person. Emitted instead of silently parking the ticket, so the orchestrator learns why the worker keeps failing.
    */
   'ticket.reviewRoundsSpent': { ticketId: string; round: number; assignmentId: string; findings: string[] }
+  /**
+   * A running worker stayed silent, or only `waiting`, past `STALL_MS` after the host asked it for its status once: the main
+   * Session decides whether to ask again or restart it. The ticket and its Assignment are left as they are.
+   */
+  'ticket.stalled': { ticketId: string; assignmentId: string; idleForMs: number }
   'thread.subscribed': { threadKey: string; ticketId: string }
   /** A person dropped every ticket's Subscription, or a ticket's Executor its own, for `reason`. */
   'thread.unsubscribed': { threadKey: string; ticketId: string; by: 'person' | 'executor'; reason?: string }

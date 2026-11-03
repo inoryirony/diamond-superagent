@@ -1,7 +1,7 @@
 /** Tickets: their lifecycle from an accept to their end, their Subscriptions and their Inputs. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
+import { STALL_MS, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, stalledSince, threadKey, waitsForPerson } from './model.ts'
 import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
   Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
@@ -154,8 +154,35 @@ export class Tickets extends EnginePart {
   requestStatus(ticketId: string): boolean {
     const ticket = this.require(ticketId)
     if (!liveTicket(ticket) || runningAssignment(ticket)?.report?.state !== 'waiting') return false
-    this.addInput(ticket, { id: `status:${ticketId}:${ticket.updatedAt}`, kind: 'text', text: STATUS_REQUEST, at: this.now() })
+    this.askStatus(ticket)
     return true
+  }
+  /** Queue the status-only request for a ticket's worker; shared by a person's request and the host's probe of a stalled worker. */
+  private askStatus(ticket: Ticket): void {
+    this.addInput(ticket, { id: `status:${ticket.id}:${ticket.updatedAt}`, kind: 'text', text: STATUS_REQUEST, at: this.now() })
+  }
+  /**
+   * Watches one open ticket's running worker for silence (see `stalledSince`). The first time it is silent past `STALL_MS` the
+   * worker is asked for its status and `probedAt` records when; if it is still silent `STALL_MS` after that probe, the main
+   * Session is told with `ticket.stalled`. Nothing ends or changes state. After telling, `probedAt` moves to `now`, so one
+   * silence raises one event per `STALL_MS` rather than one per pass; a worker that speaks again moves its anchor past `probedAt`
+   * and is probed afresh.
+   */
+  stall(ticketId: string, now: string): void {
+    const ticket = this.repo.tickets.get(ticketId)
+    const assignment = ticket && liveTicket(ticket) ? runningAssignment(ticket) : undefined
+    const anchor = assignment && stalledSince(assignment, now)
+    if (!ticket || !assignment || !anchor) return
+    if (!assignment.probedAt || Date.parse(assignment.probedAt) < Date.parse(anchor)) {
+      assignment.probedAt = now
+      this.repo.tickets.save(ticket)
+      this.askStatus(ticket)
+      return
+    }
+    if (Date.parse(assignment.probedAt) >= Date.parse(now) - STALL_MS) return
+    assignment.probedAt = now; ticket.updatedAt = now
+    this.repo.tickets.save(ticket)
+    this.emit('ticket.stalled', { ticketId, assignmentId: assignment.id, idleForMs: Date.parse(now) - Date.parse(anchor) })
   }
   /**
    * Stops a ticket on behalf of a human, ending any active assignments.

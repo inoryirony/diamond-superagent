@@ -1,6 +1,7 @@
 /** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
-import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { latestAssignment, liveTicket, runningAssignment, type EngineForExecutor, type Ticket } from '../../core/index.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import { MrSchema, mrId, SOURCE as GITLAB } from '../../sources/gitlab-mr.ts'
@@ -10,6 +11,7 @@ import { readResource, type ResourceHost } from '../resources.ts'
 import type { Store } from '../store.ts'
 import { reportRelay, threadFollowedNotice } from '../notices.ts'
 import type { Sessions } from '../sessions.ts'
+import { missingEvidence, toolCalls } from '../session-actions.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 /**
@@ -63,7 +65,7 @@ export interface ExecutorToolsHost {
   sendReplies(): Promise<void>
 }
 
-export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
+export function executorTools(host: ExecutorToolsHost, ticket: Ticket, agent: Pick<Agent, 'session'>): Tool[] {
   const ticketId = ticket.id
   return [
     readTool('Read one page of a resource of this ticket that the resource parameter lists. Follow next_offset, and next_resource where a page names one.',
@@ -125,10 +127,21 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         pr_number: z.number().int().positive().nullish().describe(`The ticket's GitHub pull request: its source PR, or one by the agent's GitHub account from a branch named after this ticket (DSH_SUPERAGENT_NAME). Only a deployment with a GitHub account reads it.`),
         mr: z.string().trim().min(1).nullish().describe(`The ticket's GitLab merge request, as its web URL or "<project path>!<iid>", such as https://git.example.com/group/project/-/merge_requests/7 or group/project!7. Only a deployment with a GitLab account reads it.`),
         reply_to_trigger_id: z.string().optional().describe('The explicit human question this report answers; never for ordinary progress.'),
+        evidence: z.array(z.object({
+          what: z.string().trim().min(1).max(300).describe('What was checked: the command, query or file read.'),
+          result: z.string().trim().min(1).max(600).describe('What it actually showed.'),
+        })).max(12).optional().describe('With ready: what you ran after your last change and what it showed; ready without it is refused.'),
       }).strict(),
       execute: async (args, signal) => {
         const current = host.store.tickets.get(ticketId)
         if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
+        // A ready result must show what ran after the last change: the host reads that from the Session's own log, not from the claim.
+        if (args.state === 'ready') {
+          const started = (runningAssignment(current) ?? latestAssignment(current))?.startedAt
+          const refused = missingEvidence(toolCalls(agent, started ? Date.parse(started) : 0), args.evidence)
+          if (refused) throw new Error(refused)
+        }
+        const proof = args.evidence?.length ? { evidence: args.evidence } : {}
         // A deployment runs one source control account or the other, so a report names its change on that one. Reading the PR
         // through a GitHub account the deployment does not have used to throw and lose the whole report, even on a ticket whose
         // work is a GitLab merge request, so the branch that does not apply is skipped rather than attempted.
@@ -141,7 +154,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
             const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
               ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
               ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
-            const updated = host.engine.report(ticketId, report)
+            const updated = host.engine.report(ticketId, { ...report, ...proof })
             const relay = reportRelay(updated, report)
             if (relay) host.sessions.relay(relay.id, relay.text)
             return { reported: true, notification: relay ? 'orchestrator' : 'internal_only', note: ignored,
@@ -155,7 +168,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
-          const updated = host.engine.report(ticketId, report)
+          const updated = host.engine.report(ticketId, { ...report, ...proof })
           const relay = reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
           const notification = relay ? 'orchestrator' : 'internal_only'
