@@ -1,7 +1,7 @@
 /** The domain Engine: the single entry point of the core, and the role interfaces its callers receive. */
 import { UserError } from './errors.ts'
-import { isoTime, liveTicket } from './model.ts'
-import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, Trigger } from './model.ts'
+import { isoTime, liveTicket, runningAssignment } from './model.ts'
+import type { ChannelRef, Decision, PolicyEffect, ReportEntry, ThreadRef, Ticket, Trigger } from './model.ts'
 import type { Candidate, Repositories, ReviewReport, ReviewerPort } from './ports.ts'
 import type { EngineOptions } from './part.ts'
 import { Assignments, type WorkerReport } from './assignments.ts'
@@ -86,6 +86,11 @@ export class Engine {
     }
     for (const thread of this.repo.threads.active()) {
       if (thread.pending.length && !thread.evaluating) this.repo.atomic(() => { this.evals.start(thread.key, policy) })
+    }
+    // A running worker silent past STALL_MS is asked for its status once, and the main Session hears of it if it stays silent (see `Tickets.stall`).
+    const now = this.options.now?.() ?? new Date().toISOString()
+    for (const ticket of this.repo.tickets.active()) {
+      if (liveTicket(ticket) && runningAssignment(ticket)) this.repo.atomic(() => { this.tickets.stall(ticket.id, now) })
     }
   }
 
@@ -249,7 +254,9 @@ export class Engine {
    * @throws UserError for an unknown or ended ticket, an ended assignment, a question that comes with a ready result or an
    * answer, or a question or answer that names a message that is not a person's or did not reach the ticket.
    */
-  report(ticketId: string, report: WorkerReport): Ticket { return this.repo.atomic(() => this.assignments.report(ticketId, report)) }
+  report(ticketId: string, report: WorkerReport, options?: { by?: ReportEntry['by'] }): Ticket {
+    return this.repo.atomic(() => this.assignments.report(ticketId, report, options))
+  }
   /**
    * Handles an assignment that was running when the host stopped: restarts it with a recovery note unless its latest report is
    * `waiting`, `ready`, `blocked`, or `failed` and no Input reached its worker after that report, in which case it keeps its

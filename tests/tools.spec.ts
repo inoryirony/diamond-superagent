@@ -112,6 +112,7 @@ it('answers every routing tool in one shape: the decision it recorded, why, and 
   const route = async (item: Record<string, unknown>) => ((await run('orchestrator_route', { decisions: [item] })).results as unknown[])[0]
   const other = feishu('3', '@bot 顺便看看这个')
   h.runtime.receive(other); await h.runtime.idle()
+  await h.readTrigger(h.runtime.masterId, other.id)
   expect(await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: other.id })).toEqual({ trigger_id: other.id, kind: 'attach',
     reason: expect.any(String), ticket: card })
   const status = await run('orchestrator_ticket_request_status', { ticket_id: ticket.id })
@@ -139,6 +140,7 @@ it('answers a question from the route, where it was written and without a ticket
   const lark = vi.mocked(Commands.prototype.lark)
   const question = feishu('1', '@bot 晨报的窗口是按什么日期算的？')
   h.runtime.receive(question); await h.runtime.idle()
+  await h.readTrigger(h.runtime.masterId, question.id)
   const answer = '按 opp_job.created_at 的自然日，见 report/window.py:12。'
   expect(await route({ kind: 'answer', trigger_id: question.id, text: answer })).toEqual({ trigger_id: question.id, kind: 'answer', decision: 'ignore',
     reason: 'Answered directly by the orchestrator, without a ticket' })
@@ -149,6 +151,7 @@ it('answers a question from the route, where it was written and without a ticket
   // A Feishu answer keeps the IM limit, which the Outbox checks before anything is queued.
   const second = feishu('2', '@bot 再问一个')
   h.runtime.receive(second); await h.runtime.idle()
+  await h.readTrigger(h.runtime.masterId, second.id)
   expect(await route({ kind: 'answer', trigger_id: second.id, text: words(IM_WORDS + 1) })).toMatchObject({ refused: expect.stringContaining(`maximum is ${IM_WORDS}`) })
   const chatter = feishu('3', '@bot 谢谢'), again = feishu('4', '@bot 修一下回归')
   for (const trigger of [chatter, again]) h.runtime.receive(trigger)
@@ -163,6 +166,7 @@ it('routes several triggers in one call, in order, and answers a refused or fail
   const thanks = feishu('2', '@bot 谢谢'), request = feishu('3', '@bot 另一个问题'), other = feishu('4', '@bot 顺便看看这个'), more = feishu('6', '@bot 还有这个')
   for (const trigger of [thanks, request, other, more]) h.runtime.receive(trigger)
   await h.runtime.idle()
+  for (const trigger of [other, more]) await h.readTrigger(h.runtime.masterId, trigger.id)
   // One attach fails unexpectedly, as a busy database would.
   const attach = h.runtime.engine.attach.bind(h.runtime.engine)
   vi.spyOn(h.runtime.engine, 'attach').mockImplementation((ticketId, triggerId, note) => {

@@ -37,7 +37,7 @@ interface Skill { name: string; description: string; content: string }
  * Maximum combined character count of system prompt and tool definitions per role (~5% above baseline).
  * Lower this limit when shrinking model-facing text; raise it only intentionally and explain why in the commit message.
  */
-const BUDGET: Record<Role, number> = { orchestrator: 61_200, worker: 44_400 }
+const BUDGET: Record<Role, number> = { orchestrator: 61_800, worker: 44_900 } // worker +500: the evidence rule's prompt lines and the report's evidence schema
 const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
 const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
 const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'
@@ -100,6 +100,8 @@ async function start() {
   const sections = new Map<string, Section>()
   const skills = new Map<string, Skill[]>()
   const inputs: { sessionId: string; text: string }[] = []
+  /** What each Session's fake model called, as DSH logs it: the log a ready report is checked against. */
+  const logs = new Map<string, { type: string; time: number; data: unknown }[]>()
   const create = async ({ sessionId }: { sessionId: string }) => {
     if (agents.has(sessionId)) return
     const agentCtx = new Context()
@@ -123,7 +125,9 @@ async function start() {
     const deliver = (queue: UserMessage[]) => (message: UserMessage) => {
       queue.push(message); record(message); agents.get(sessionId)!.status = 'running'
     }
-    const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: () => {} }
+    const events: { type: string; time: number; data: unknown }[] = []
+    logs.set(sessionId, events)
+    const session = { id: sessionId, snapshotEvents: () => events, requestHeader: () => undefined, append: () => {} }
     agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver(inbox.nextTurn), steer: deliver(inbox.nextStep),
       inject: record, status: 'idle', cancel: () => {}, whenIdle: async () => {}, session } as never)
   }
@@ -148,8 +152,13 @@ async function start() {
   const feishuSource = { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } }
   runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: allowed }, eval: { ...settings.eval, mode: 'auto' },
     sources: { ...settings.sources, feishu: feishuSource } })
-  const run = async (sessionId: string, name: string, args: unknown) =>
-    await tools.get(sessionId)!.get(name)!.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
+  const run = async (sessionId: string, name: string, args: unknown) => {
+    // A worker runs a check before it reports ready, as the host requires and DSH logs as the call starts.
+    if (name === 'orchestrator_report' && (args as { state?: string }).state === 'ready') logs.get(sessionId)?.push({ type: 'tool/call', time: Date.now(), data: { name: 'bash' } })
+    // DSH logs every call as it starts, with the raw arguments the model produced.
+    logs.get(sessionId)?.push({ type: 'tool/call', time: Date.now(), data: { name, arguments: JSON.stringify(args) } })
+    return await tools.get(sessionId)!.get(name)!.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
+  }
   const stop = async () => { await runtime.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) }
   return { ctx, runtime, agents, tools, sections, skills, inputs, run, stop }
 }
@@ -187,6 +196,8 @@ async function drive(host: Host) {
   await run(workerA, 'orchestrator_report', { state: 'progress', summary: 'It reads the config.', human_action: null, reply_to_trigger_id: request.id })
   const other = feishu('9', '@bot 顺便看看这个')
   await runtime.receive(other)
+  // The main Session reads the conversation of a message before it attaches it, as dispatch asks.
+  await run(master, 'orchestrator_read', { resource: `trigger/${other.id}` })
   await run(master, 'orchestrator_route', { decisions: [{ kind: 'attach', ticket_id: a, trigger_id: other.id }] })
   await run(workerA, 'orchestrator_thread_unrelated', { thread: `feishu:${CHAT}:om_9`, reason: 'It asks for something else.' })
   await run(workerA, 'orchestrator_thread_follow', { thread: `feishu:${CHAT}:om_7`, reason: 'The same settings page.' })

@@ -453,7 +453,7 @@ export class DshExecutor implements Executor {
   /** Records a `failed` report on the ticket and relays the failure to the main Session in one transaction. */
   private failed(ticketId: string, summary: string): void {
     this.host.store.atomic(() => {
-      const updated = this.host.engine.report(ticketId, { state: 'failed', summary })
+      const updated = this.host.engine.report(ticketId, { state: 'failed', summary }, { by: 'host' })
       this.relay(resultRelay(updated, 'failed', summary))
     })
   }
@@ -699,7 +699,7 @@ export class DshExecutor implements Executor {
     const said = [text, stopped].filter(Boolean).join('\n\n')
     this.host.store.atomic(() => {
       const before = latestReport(current)?.summary ?? ''
-      const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before })
+      const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before }, { by: 'host' })
       // A quiet final after orchestrator_report is not a new status or an empty handoff.
       if (said) this.relay(resultRelay(updated, 'waiting', said))
       else if (!before.trim()) {

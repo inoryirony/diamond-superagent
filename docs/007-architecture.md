@@ -339,6 +339,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
 | `src/app/sessions.ts` | Sessions |
+| `src/app/session-actions.ts` | What a Session called, read from the `tool/call` events of its log: the void verdict of a Reviewer that changed the code it judged, the evidence a ready report needs, and `readConversation`, whether the main Session read the conversation of a chat trigger before it attached or answered it |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/reviewers.ts` | `Reviewers`: each review of a ticket's result in a Session of its own, the deploy phase a review may run, and its verdict |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
@@ -348,6 +349,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/source-context.ts` | `sourceContextOf`: each Source kind's `SourceContext` |
 | `src/app/links.ts` | `sourceLink`, the page of a Trigger's message, and `candidateCard` |
 | `src/app/cards.ts` | Compact cards of Triggers, Tickets, Threads and Decisions for models, the closed set of ticket card states `TICKET_STATES`, and `textPage` |
+| `src/app/desk.ts` | The desk: one compact line per open Ticket for the `desk` resource, and the summary of at most 600 characters the main Session's prompt carries |
 | `src/app/resources.ts` | `RESOURCES` and `readResource`: what `orchestrator_read` reads, for each role |
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
@@ -450,7 +452,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
 | `tests/reviews.spec.ts` | A review of a result in a Session of its own: passing, returning with findings, its rounds, one that ends without a verdict, and the verify commands reaching the Reviewer instead of a subprocess |
 | `tests/merge-request-and-restart.spec.ts` | A report's merge request resolved from its URL or short form, and a review whose rounds are spent telling the main Session so it can restart the worker with an instruction |
+| `tests/ledger-watchdog.spec.ts` | The report ledger and its authors, review rounds that count only reviews with a verdict, a ready result after the rounds are spent ending `unreviewed`, the liveness watchdog's probe and `ticket.stalled`, and the desk summary |
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
+| `tests/capability-parity.spec.ts` | One allow list for the main Session, workers and reviewers, and the void verdict of a Reviewer Session that changed a file |
+| `tests/ready-evidence.spec.ts` | A ready report's evidence: refused after a change without evidence, with no run, or with no run after the last change; kept on the ledger once it stands |
+| `tests/conversation-guard.spec.ts` | The conversation guard: an attach or an answer of a chat trigger is refused until its conversation was read, and `trigger/<id>` carries that conversation's live history or says it is unavailable |
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
@@ -559,7 +565,7 @@ Each Executor has six application tools:
 
 A hand-back returns `queued: false` if another Ticket still owns the message, or this Ticket never owned it. For example, a bot message went to Eval independently.
 
-The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `WORK_TOOLS` in `src/app/sessions.ts` retains available file, search, shell, job, web, skill, todo and subagent tools. Workers do not receive tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
+The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `SESSION_TOOLS` in `src/app/sessions.ts` is the one tool surface of the main Session, workers and reviewers, filtered to what the profile registered: file, search, shell, job, web, skill, todo and subagent tools. No role receives tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
 
 ### Result shapes and assessment context
 

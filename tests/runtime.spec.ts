@@ -59,6 +59,14 @@ let agents: Map<string, { id: string; status: string; inbox: { nextTurn: UserMes
 const runTool = async (sessionId: string, name: string, args: unknown) => {
   const tool = tools.get(sessionId)?.get(name)
   if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
+  // A worker runs a check before it reports ready, as the host requires; DSH logs the call as it starts.
+  if (name === 'orchestrator_report' && (args as { state?: string }).state === 'ready') {
+    const session = (agents.get(sessionId) as unknown as { session?: { snapshotEvents(): unknown[] } } | undefined)?.session
+    session?.snapshotEvents().push({ type: 'tool/call', time: Date.now(), data: { name: 'bash' } })
+  }
+  // DSH logs every call as it starts, with the raw arguments the model produced.
+  const log = (agents.get(sessionId) as unknown as { session?: { snapshotEvents(): unknown[] } } | undefined)?.session?.snapshotEvents()
+  log?.push({ type: 'tool/call', time: Date.now(), data: { name, arguments: JSON.stringify(args) } })
   const output = await tool.execute(args, { signal: new AbortController().signal })
   expect(JSON.parse(JSON.stringify(output))).toStrictEqual(output)
   await runtime.idle()
@@ -130,6 +138,8 @@ const worktreeName = 'fix-regression'
 /** Route one decision with orchestrator_route in the Session that holds its candidate, answering its result; a refused one throws its reason. */
 async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
   const sessionId = typeof item.trigger_id === 'string' ? evalSession(item.trigger_id) : runtime.masterId
+  // A model reads the conversation before it attaches or answers, as dispatch asks and the host enforces.
+  if (item.kind === 'attach' || item.kind === 'answer') await runTool(sessionId, 'orchestrator_read', { resource: `trigger/${String(item.trigger_id)}` }).catch(() => undefined)
   const { results } = await runTool(sessionId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
   if (results[0]!.refused) throw new Error(String(results[0]!.refused))
   return results[0]!
@@ -1589,7 +1599,8 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   expect(guards.get(sessionId)!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get(sessionId)!()).toBe('Ticket ended; new work needs a new authorized ticket')
-  expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }])
+  // Every role has the same tools: the main Session's list is the worker's, not a narrower one.
+  expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
   // A worker keeps only the profile's work tools: none that ask a person, change the profile, schedule or start work outside
   // the worker slots, reach other Sessions or edit documents, whenever they were registered.
   expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])

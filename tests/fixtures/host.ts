@@ -170,6 +170,10 @@ export async function startRuntime(seed?: (store: Store) => void) {
   /** Each Session's next step, which takes the messages that wait for one. */
   const steps = new Map<string, () => void>(), claims = new Map<string, () => void>()
   const tools = new Map<string, Map<string, RegisteredTool>>()
+  /** What each Session's fake model called, as DSH logs it: the log a ready report is checked against. */
+  const logs = new Map<string, { type: string; time: number; data: unknown }[]>()
+  /** What each Session was restricted to, in order: the `restrict` specs the Sessions bundle registered. */
+  const restricts = new Map<string, unknown[]>()
   const deliveries = vi.fn<(request: Delivery) => void>()
   let http!: HttpHandler
   const resolveDefault = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
@@ -180,7 +184,8 @@ export async function startRuntime(seed?: (store: Store) => void) {
       const sessionTools = new Map<string, RegisteredTool>()
       tools.set(sessionId, sessionTools)
       const register = (tool: RegisteredTool) => { sessionTools.set(tool.name, tool); return () => sessionTools.delete(tool.name) }
-      agentCtx.reflect.provide('tools', { register, get: () => undefined, restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) })
+      agentCtx.reflect.provide('tools', { register, get: (name: string) => name === 'pwsh' ? undefined : {},
+        restrict: vi.fn((spec: unknown) => { restricts.set(sessionId, [...restricts.get(sessionId) ?? [], spec]); return () => {} }), guard: vi.fn(() => () => {}) })
       agentCtx.reflect.provide('skills', { register: () => () => {} })
       agentCtx.reflect.provide('systemPrompt', { section: () => () => {} })
       const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[],
@@ -216,7 +221,9 @@ export async function startRuntime(seed?: (store: Store) => void) {
         turn++
         take(true)
       })
-      const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
+      const events: { type: string; time: number; data: unknown }[] = []
+      logs.set(sessionId, events)
+      const session = { id: sessionId, snapshotEvents: () => events, requestHeader: () => undefined, append: vi.fn() }
       let status = 'idle'
       const idle: (() => void)[] = []
       // A cancel drops the inbox unless kept, and the turn it stops ends a moment later, which DSH says.
@@ -296,14 +303,25 @@ export async function startRuntime(seed?: (store: Store) => void) {
     await vi.waitFor(() => expect(runtime.reviewers.agent(ticketId, round)).toBeDefined(), { timeout: 5000 })
     await runtime.reviewers.reviewed(sessionId, verdict ?? reviews.verdict)
   }
+  /** The fake model of `sessionId` called `name`, as DSH logs a call when it starts. */
+  const ran = (sessionId: string, name = 'bash') => { logs.get(sessionId)?.push({ type: 'tool/call', time: Date.now(), data: { name } }) }
+  /** Whether a worker is taken to have run a check before each ready report; a test of the evidence rule itself turns it off. */
+  const checks = { before: true }
   const runTool = async (sessionId: string, name: string, args: unknown) => {
     const tool = tools.get(sessionId)?.get(name)
     if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
+    if (checks.before && name === 'orchestrator_report' && (args as { state?: string }).state === 'ready') ran(sessionId)
+    // DSH logs every call as it starts, with the raw arguments the model produced.
+    logs.get(sessionId)?.push({ type: 'tool/call', time: Date.now(), data: { name, arguments: JSON.stringify(args) } })
     return await tool.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
   }
+  /** The read a model makes of a trigger's conversation before it attaches or answers: its resource, which carries the live history. */
+  const readTrigger = (sessionId: string, triggerId: string) => runTool(sessionId, 'orchestrator_read', { resource: `trigger/${triggerId}` })
   /** Route one decision with orchestrator_route in the Session that holds its candidate, answering its result; a refused one throws its reason. */
   async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
     const sessionId = typeof item.trigger_id === 'string' ? evalSession(item.trigger_id) : runtime.masterId
+    // A model reads the conversation before it attaches or answers, as dispatch asks and the host enforces.
+    if (item.kind === 'attach' || item.kind === 'answer') await readTrigger(sessionId, String(item.trigger_id)).catch(() => undefined)
     const { results } = await runTool(sessionId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
     if (results[0]!.refused) throw new Error(String(results[0]!.refused))
     return results[0]!
@@ -329,6 +347,6 @@ export async function startRuntime(seed?: (store: Store) => void) {
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
   return { runtime, ctx, directory, agents, tools, deliveries, relays, cards, candidates, evalSession, runTool, route, acceptedTicket, api, controller, subprocess, hooks, failures, resolveDefault, stop,
-    jobs, subagents, step, claim, review, finishReview, reviews }
+    jobs, subagents, step, claim, review, finishReview, reviews, ran, checks, restricts, readTrigger }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>
