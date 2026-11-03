@@ -1,11 +1,11 @@
 ---
 name: verify-superagent
-description: "Drive dsh-superagent the way a person does and prove the behaviour changed: the DSH panel (nine pages of a real host via the loopback management API) and the browser preview panel with its fake server. Use when a change touches src/core, src/app, src/sources, src/client, prompts/ or the lane/board work, and you need evidence from a running app rather than a passing unit test."
+description: "Drive diamond-superagent the way a person does and prove the behaviour changed: the DSH panel (nine pages of a real host via the loopback management API) and the browser preview panel with its fake server. Use when a change touches src/core, src/app, src/sources, src/client, prompts/ or the lane/board work, and you need evidence from a running app rather than a passing unit test."
 ---
 
-# Verify dsh-superagent
+# Verify diamond-superagent
 
-dsh-superagent is a **DSH bundle**: a Source watches GitHub/Feishu/DingTalk/Jira/GitLab, each conversation is a **lane**
+diamond-superagent is a **DSH bundle**: a Source watches GitHub/Feishu/DingTalk/Jira/GitLab, each conversation is a **lane**
 (one Session), a Policy gates who may ask for what, an authorized request becomes a **Ticket**, and the Ticket runs in
 its own Executor Session. Nothing about that is visible in `vitest` output. This skill drives the two surfaces a person
 actually touches and captures proof for the rest.
