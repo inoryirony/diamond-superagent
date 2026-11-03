@@ -148,16 +148,21 @@ export class Reviewers implements ReviewerPort, ReviewerSessions {
   resume(): void {
     for (const ticket of this.host.store.tickets.open()) {
       const review = pendingReview(ticket)
-      // A pending review whose result a later report replaced can never be judged and would keep the ticket waiting: nothing
-      // would ever end it, and its round is already behind. Older versions of this code could leave one behind, so a restart
-      // closes it here before resuming what is still legitimate.
-      if (review && ticket.assignments.at(-1)?.report && review.at < (ticket.assignments.at(-1)!.report!.at)) {
+      if (!review) continue
+      // A pending review can never be judged once its result is no longer the one under judgement: the reviewer would read a
+      // result the ticket has moved past, and nothing would end the review. That is the case when the ticket has a newer
+      // Assignment than the one under review, or the reviewed Assignment reported again after this review was asked for.
+      // Older builds left such reviews behind, so a restart closes them before resuming what is still legitimate.
+      const reviewed = ticket.assignments.find(assignment => assignment.id === review.assignmentId)
+      const newerWork = !reviewed || ticket.assignments.at(-1)?.id !== review.assignmentId
+        || (!!reviewed.report && reviewed.report.at > review.at)
+      if (newerWork) {
         this.host.store.atomic(() => this.host.engine.reviewEnded(ticket.id,
           { outcome: 'passed', unfinished: true,
-            summary: `Review ${review.round} was superseded: a newer report replaced the result it judged.` }))
+            summary: `Review ${review.round} was superseded: the ticket moved past the result it judged, so it cannot be settled.` }))
         continue
       }
-      if (review) this.review({ ticketId: ticket.id, assignmentId: review.assignmentId, round: review.round })
+      this.review({ ticketId: ticket.id, assignmentId: review.assignmentId, round: review.round })
     }
   }
   /** Tell the main Session that the winner of the review is ready for a person, as a ready report would have. */
