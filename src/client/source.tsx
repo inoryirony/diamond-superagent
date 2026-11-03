@@ -6,6 +6,7 @@ import { DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { sourceMark } from './marks.ts'
 import { usePanel, usePanelData } from './provider.tsx'
+import { blockingProblem } from '../setup.ts'
 import { setupPage, settingsRoute, type Route } from './route.ts'
 import { ConfigHistory, Fields, SourceField, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { actorName, healthText, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
@@ -100,7 +101,7 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
   const { dot, label: state } = sourceMark(t, source.state)
   const { received, filtered, lastAt } = source.stats
   // Omit healthy parts and suppress per-part notes when a setup problem already explains why the Source is stopped.
-  const notes = source.enabled && !problem && !setup?.problem ? source.health.filter(item => item.state === 'error'
+  const notes = source.enabled && !problem && !blockingProblem(setup?.problems ?? []) ? source.health.filter(item => item.state === 'error'
     || item.state === 'paused') : []
   return <li className="dt-row">
     <Dot state={dot} label={state} />
@@ -143,7 +144,7 @@ export function SourceStatus() {
   const { setup } = usePanelData()
   const { data, error } = usePoll(() => call('GET sources'), [])
   // Global deployment setup problems halt all Sources and show at the top; Source-specific setup problems show on that Source's row.
-  const elsewhere = setup?.problem?.place === 'deployment' ? setup.problem : undefined
+  const elsewhere = blockingProblem(setup?.problems ?? [])
   return <div className="dt-form">
     <StatusHead hint={t('sourceStatusIntro')} settings="source" />
     {elsewhere && <p className="dt-error">

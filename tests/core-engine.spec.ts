@@ -61,7 +61,20 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
   const read = (ticketId: string) => engine.inputsRead(ticketId, repo.tickets.get(ticketId)!.inputs.flatMap(input =>
     input.kind === 'trigger' && input.readAt === null ? [input.id] : []))
   const decide = (candidate: Candidate, outcome: Outcome) => engine.decide(candidate.triggers[0]!.id, { ...outcome, evalId: candidate.evalId })
-  return { repo, engine, outbox, withdrawn, requests, assessor, executor, delivered, settle, pump, read, decide,
+  /**
+   * The main Session's usual reading of a message its ticket's worker decides: it sees the candidate and ignores it. Call it
+   * where a test's arithmetic counted a follow-up as reaching only the worker, since every person's message now goes to Eval.
+   */
+  const ignoreWaiting = (reason = 'chat') => {
+    pump()
+    for (let next = requests.findIndex(candidate => engine.candidate(candidate.triggers[0]!.id)?.evalId === candidate.evalId);
+      next >= 0; next = requests.findIndex(candidate => engine.candidate(candidate.triggers[0]!.id)?.evalId === candidate.evalId)) {
+      const candidate = requests[next]!
+      engine.decide(candidate.triggers[0]!.id, { kind: 'ignore', reason, evalId: candidate.evalId })
+      requests.splice(next, 1)
+    }
+  }
+  return { repo, engine, outbox, withdrawn, requests, assessor, executor, delivered, settle, pump, read, decide, ignoreWaiting,
     setVersion: (value: string) => { version = value }, setPaused: (value: boolean) => { paused = value }, tick: (seconds: number) => { clock += seconds } }
 }
 function accepted(h: ReturnType<typeof harness>, id = '1', thread = 't1') {
@@ -184,23 +197,22 @@ describe('eval', () => {
   })
 })
 describe('subscription fan-out', () => {
-  it('delivers a person\'s later message on a subscribed thread to the live ticket as context, and not to Eval', async () => {
+  it('delivers a person\'s later message on a subscribed thread to the live ticket, and queues it for the main Session to read', async () => {
     const h = harness()
     const decision = accepted(h)
-    const requests = h.requests.length
     h.engine.receive(trigger('2', { actor: guest })); h.pump()
     const ticket = h.repo.tickets.get(decision.ticketId!)!
     expect(ticket.inputs).toEqual([expect.objectContaining({ kind: 'trigger', triggerId: '2' })])
     expect(ticket.undelivered).toEqual([])
     expect(h.delivered).toEqual([[ticket.id, ticket.inputs[0]!.id]])
-    expect(h.repo.triggers.disposition('2')).toEqual({ fanout: [ticket.id], at: expect.any(String) })
-    // No Eval, so no Decision and no timeout, and the Thread's queue stays free for a new request.
-    expect([h.requests.length, h.repo.threads.get('chat:t1')!.pending, h.repo.decisions.byThread('chat:t1').length]).toEqual([requests, [],
-      1])
-    h.tick(600); h.engine.evaluateDue()
+    expect(h.repo.triggers.disposition('2')).toMatchObject({ fanout: [ticket.id] })
+    // The main Session reads the message as a candidate, though the ticket's worker still decides it, so it is one Eval.
+    expect(h.requests.at(-1)!.triggers.map(item => item.id)).toEqual(['2'])
     expect(h.repo.decisions.byThread('chat:t1')).toHaveLength(1)
-    // A bot's message there still goes to Eval, which the gate does not admit.
+    // A bot's message there queues behind the candidate the main Session reads: it takes the next Eval, and the gate rejects it.
     h.engine.receive(trigger('3', { human: false })); h.pump()
+    h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'chat' })
+    h.pump()
     expect(h.repo.decisions.byThread('chat:t1').at(-1)).toMatchObject({ kind: 'ignore', triggerIds: ['3'] })
   })
   it('keeps inputs undelivered until an assignment is running, and asks to launch one whose launch failed again', () => {
@@ -357,7 +369,7 @@ describe('resume and stop', () => {
   })
 })
 describe('follow-ups', () => {
-  it('takes a follow-up an older version queued out of the queue without a Decision, and keeps one sent to Eval again', () => {
+  it('keeps an earlier version\'s queued follow-ups in the queue for the main Session, and one a person sent to Eval again', () => {
     const h = harness()
     accepted(h)
     h.engine.receive(trigger('2', { actor: guest })); h.engine.receive(trigger('3', { actor: guest }))
@@ -365,7 +377,8 @@ describe('follow-ups', () => {
     const thread = h.repo.threads.get('chat:t1')!
     h.repo.threads.save({ ...thread, pending: ['2', '3'] })
     h.engine.reevaluate('3'); h.pump()
-    expect(h.requests.at(-1)!.triggers.map(item => item.id)).toEqual(['3'])
+    // The main Session reads both: the queue takes a follow-up a ticket's worker decides rather than dropping it.
+    expect(h.requests.at(-1)!.triggers.map(item => item.id)).toEqual(['2', '3'])
     expect(h.repo.threads.get('chat:t1')!.pending).toEqual([])
     expect(h.repo.decisions.byThread('chat:t1').flatMap(decision => decision.triggerIds)).toEqual(['1'])
   })
@@ -384,26 +397,26 @@ describe('follow-ups', () => {
     const h = harness()
     const decision = accepted(h)
     h.engine.receive(trigger('2', { actor: guest })); h.pump()
+    h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'chat' })
     h.engine.stopTicket(decision.ticketId!, 'not needed')
-    // The follow-up held no Eval while the ticket decided it, so the next request is assessed at once rather than after a
-    // timeout, together with the follow-up, which the stop let go of before its worker took it up.
+    // The follow-up was read and ignored; the message a stop let go of and the next request then reach the Session together.
     h.engine.receive(trigger('3')); h.pump()
-    expect(h.requests.at(-1)!.triggers.map(item => item.id)).toEqual(['2', '3'])
+    expect(h.requests.at(-1)!.triggers.map(item => item.id)).toEqual(['3'])
   })
 })
 describe('hand-back', () => {
-  it('queues a message that reached a ticket for a fresh Eval with the gate\'s strength, once per ticket, and keeps the subscription',
+  it('records a hand-back on a message the main Session already reads, once per ticket, and keeps the subscription',
     () => {
     const h = harness()
     const ticketId = accepted(h).ticketId!
     h.engine.receive(trigger('2')); h.engine.receive(trigger('3', { actor: guest })); h.pump()
-    expect(h.engine.handback(ticketId, '2', 'A new request')).toBe(true); h.pump()
-    expect(h.requests.at(-1)).toMatchObject({ strength: 'explicit', triggers: [{ id: '2' }] })
+    // Both messages already wait for the main Session as one candidate; the hand-back adds the worker's reason and queues nothing.
+    expect(h.engine.handback(ticketId, '2', 'A new request')).toBe(false); h.pump()
     expect(h.repo.triggers.disposition('2')!.handbacks).toEqual([{ ticketId, reason: 'A new request', at: expect.any(String) }])
     h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'chat' })
     expect(() => h.engine.handback(ticketId, '2', 'Again')).toThrow(new UserError('handedBack'))
     expect(h.engine.handback(ticketId, '3', 'A guest asks for more')).toBe(true); h.pump()
-    expect(h.requests.at(-1)).toMatchObject({ strength: 'inferred', triggers: [{ id: '3' }] })
+    expect(h.repo.triggers.disposition('3')!.handbacks).toEqual([{ ticketId, reason: 'A guest asks for more', at: expect.any(String) }])
     expect(h.repo.threads.get('chat:t1')!.subscriptions).toContain(ticketId)
     // Only a message that reached the ticket can go back.
     h.engine.receive(trigger('4', { threads: [{ source: 'chat', id: 'elsewhere' }] }))
@@ -463,12 +476,14 @@ describe('context threads and notes', () => {
     h.engine.receive(trigger('3', { actor: guest })); h.pump()
     expect(h.repo.triggers.disposition('3')).toMatchObject({ fanout: [owner, follower], context: [follower] })
     expect(h.repo.tickets.get(follower)!.inputs.at(-1)).toMatchObject({ triggerId: '3', context: true })
-    // On the follower's own Thread no longer: a message reaching only it goes to Eval, with the guest's that the stopped owner
-    // let go of.
+    // On the follower's own Thread no longer: a message reaching only it goes to Eval, and the guest's is already a candidate
+    // the main Session reads.
+    expect(h.requests.map(request => request.triggers.map(item => item.id))).toEqual(expect.arrayContaining([['3']]))
+    h.ignoreWaiting()
     h.engine.stopTicket(owner, 'done')
     h.engine.report(follower, { state: 'blocked', summary: 'needs a decision' })
     h.engine.receive(trigger('4')); h.pump()
-    expect(h.requests.at(-1)!.triggers.map(item => item.id)).toEqual(['3', '4'])
+    expect(h.requests.at(-1)!.triggers.map(item => item.id)).toEqual(['4'])
     expect(waitsForPerson(h.repo.tickets.get(follower)!)).toBe(true)
   })
   it('sends a message to Eval when the ticket it reached cannot resume and only a ticket following its Thread for context is left', () => {
@@ -530,12 +545,15 @@ describe('follow-up owners', () => {
     const h = harness()
     const ticketId = accepted(h).ticketId!
     h.engine.report(ticketId, { state: 'progress', summary: 'working' })
-    // The worker acknowledges one of two messages, and its final report was on its way before it took up the other.
+    // The worker acknowledges one of two messages, and its final report was on its way before it took up the other. The main
+    // Session reads both candidates and leaves them to the worker.
     h.tick(1); h.engine.receive(trigger('2')); h.engine.receive(trigger('3')); h.settle()
+    h.ignoreWaiting()
     h.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: '2', text: 'On it' })
     h.engine.report(ticketId, { state: 'dropped', summary: 'nothing to do' })
-    expect(h.repo.threads.get('chat:t1')!.pending).toEqual(['3'])
-    // The ticket no longer counts as having reached it, so its candidate names no ticket that gave no reason.
+    expect(h.repo.threads.get('chat:t1')!.pending).toEqual([])
+    // The ticket no longer counts as having reached it, so its candidate names no ticket that gave no reason; what it let go
+    // of reaches the main Session without the ticket.
     expect([h.repo.triggers.disposition('2')!.fanout, h.repo.triggers.disposition('3')!.fanout]).toEqual([[ticketId], []])
   })
   it('keeps a ticket open after its pull request merged while its worker is on a person\'s message it took up after its last report',
@@ -549,8 +567,9 @@ describe('follow-up owners', () => {
       h.tick(1); h.engine.receive(trigger('2')); h.settle()
       if (taken) h.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: '2', text: 'On it' })
       h.engine.threadClosed({ source: 'gh', id: 'pr-9' }, 'merged', '2026-09-23T00:00:01Z')
-      // One it has not taken up leaves the merge to end the ticket, and goes to Eval.
-      expect([h.repo.tickets.get(ticketId)!.ended?.outcome, h.repo.threads.get('chat:t1')!.pending]).toEqual(taken ? [undefined, []]
+      // One it has not taken up leaves the merge to end the ticket, and its candidate reaches the main Session; a taken-up one
+      // leaves its candidate waiting as before.
+      expect([h.repo.tickets.get(ticketId)!.ended?.outcome, h.repo.threads.get('chat:t1')!.pending]).toEqual(taken ? [undefined, ['2']]
         : ['merged', ['2']])
       // The worker's ready report ends it as the pull request did.
       if (taken) h.engine.report(ticketId, { state: 'ready', summary: 'Done' })
@@ -596,6 +615,7 @@ describe('follow-up owners', () => {
     const ticketId = accepted(h).ticketId!
     h.tick(1); h.engine.receive(trigger('2')); h.settle()
     h.engine.report(ticketId, { state: 'ready', summary: 'It reads the config.', answers: '2' })
+    h.ignoreWaiting()
     expect(h.repo.threads.get('chat:t1')!.pending).toEqual([])
     expect(h.repo.triggers.disposition('2')).toMatchObject({ fanout: [ticketId], acked: [ticketId] })
   })
@@ -615,6 +635,7 @@ describe('follow-up owners', () => {
     h.tick(1); h.engine.receive(trigger('2')); h.settle()
     h.outbox.push({ id: key('ack', '2'), channel: trigger('2').channel!, text: 'On it', kind: 'acknowledgement', ticketId })
     h.engine.report(ticketId, { state: 'dropped', summary: 'nothing to do' })
+    h.ignoreWaiting()
     expect([h.repo.threads.get('chat:t1')!.pending, h.repo.triggers.disposition('2')!.fanout]).toEqual([[], [ticketId]])
   })
   it('counts a message that resumed a ticket as taken up by the report that ends it again, unlike one that came later', () => {
@@ -628,7 +649,10 @@ describe('follow-up owners', () => {
     h.tick(1); h.settle(); h.read(ticketId)
     h.tick(1); h.engine.receive(trigger('3')); h.settle()
     h.engine.report(ticketId, { state: 'dropped', summary: 'nothing to do' })
-    expect(h.repo.threads.get('chat:t1')!.pending).toEqual(['3'])
+    // The thanks' own candidate was read and left to the worker; the request's stays for the main Session.
+    h.ignoreWaiting()
+    h.tick(1); h.engine.receive(trigger('4')); h.settle()
+    expect(h.repo.threads.get('chat:t1')!.pending).toEqual(['4'])
   })
   it('sends a follow-up its ticket let go to Eval after a stop on it was refused, but not the one a stop ended it on', () => {
     // A guest's stop is refused, and the worker drops the ticket; a member's stop ends it, and the main Session, which stopped
@@ -663,10 +687,13 @@ describe('follow-up owners', () => {
     // The worker finds the attached thread is not its ticket's, and answers nothing there: the message the main Session
     // attached goes back with the later one, and each candidate says why.
     h.engine.markUnrelated(ticketId, 'chat:x', 'about something else')
-    expect(h.repo.threads.get('chat:x')!.pending).toEqual(['2', '3'])
-    expect(h.repo.triggers.disposition('3')!.handbacks).toEqual([{ ticketId, reason: 'about something else', at: expect.any(String) }])
+    h.ignoreWaiting()
     h.pump()
-    expect(h.requests.at(-1)!.triggers.map(item => item.id)).toEqual(['2', '3'])
+    h.ignoreWaiting()
+    h.pump()
+    // The attached message and the later one each reach the main Session as a candidate; the later one carries the worker's reason.
+    expect(h.repo.triggers.disposition('3')!.handbacks).toEqual([{ ticketId, reason: 'about something else', at: expect.any(String) }])
+    expect(h.repo.threads.get('chat:x')!.pending).toEqual([])
   })
   it('keeps a follow-up two tickets reached with the one that did not hand it back, and queues it once neither decides it', () => {
     const h = harness()
@@ -678,10 +705,11 @@ describe('follow-up owners', () => {
     h.tick(1); h.engine.receive(trigger('3')); h.settle()
     expect(h.repo.triggers.disposition('3')!.fanout).toEqual([first, second])
     expect(h.engine.handback(first, '3', 'for the other ticket')).toBe(false)
-    expect(h.repo.threads.get('chat:t1')!.pending).toEqual([])
-    // The main Session may neither take nor dismiss it while the second ticket's worker decides it.
+    expect(h.repo.threads.get('chat:t1')!.pending).toEqual(['3'])
+    // The main Session may not take it while the second ticket's worker decides it, though it may read it as a candidate.
     expect(() => h.engine.decide('3', accept)).toThrow(decides(second))
-    expect(() => h.engine.decide('3', { kind: 'ignore', reason: 'chat' })).toThrow(decides(second))
+    h.ignoreWaiting()
+    // Neither ticket decides it now, so it waits for the main Session once more, with the reasons it was handed back for.
     expect(h.engine.handback(second, '3', 'neither ticket')).toBe(true)
     expect(h.repo.threads.get('chat:t1')!.pending).toEqual(['3'])
   })
@@ -855,9 +883,10 @@ describe('attach', () => {
     const ticketId = accepted(h).ticketId!
     h.engine.receive(trigger('2', { actor: guest })); h.pump()
     expect(h.delivered.map(([, input]) => input)).toEqual([key('input', ticketId, 'trigger', '2')])
-    // The follow-up reached the ticket without an Eval, and is its worker's to judge; sent to Eval again by a person, it is judged there.
-    expect(h.engine.candidate('2')).toBeUndefined()
-    expect(() => h.engine.attach(ticketId, '2')).toThrow(new UserError('workerDecides', { tickets: ticketId }))
+    // The follow-up reached the ticket and also waits for the main Session as a candidate, which its worker still decides:
+    // attaching it to that same ticket is allowed, and attaching it elsewhere is not.
+    expect(h.engine.candidate('2')).toBeDefined()
+    expect(h.engine.attach(ticketId, '2')).toMatchObject({ id: ticketId })
     expect(h.engine.reevaluate('2')).toBe(true); h.pump()
     expect(h.engine.candidate('2')).toBeDefined()
     const attached = h.engine.attach(ticketId, '2', 'The guest asks for the same fix'); h.settle()
@@ -1395,7 +1424,10 @@ describe('follow-up review: turn ends', () => {
     h.tick(1); h.engine.turnEnded(ticketId, runningAssignment(h.repo.tickets.get(ticketId)!)!.id)
     h.tick(1); h.engine.receive(trigger('3')); h.settle()
     merge(h)
-    expect(h.repo.threads.get('chat:t1')!.pending).toEqual(['3'])
+    // Both messages wait for the main Session, which reads the one the worker took up and leaves the later one to it.
+    h.ignoreWaiting()
+    h.tick(1); h.engine.receive(trigger('4')); h.settle()
+    expect(h.repo.threads.get('chat:t1')!.pending).toEqual(['4'])
   })
   it('keeps a ticket open at a merge while its worker works on a message it took up, also after a progress report', () => {
     const h = harness()
@@ -1513,7 +1545,8 @@ describe('what a worker read', () => {
     h.engine.inputsDelivered(ticketId, assignmentId, [note, message])
     h.tick(1); h.engine.report(ticketId, { state: 'progress', summary: 'Looking' })
     h.tick(1); h.engine.report(ticketId, { state: 'dropped', summary: 'Nothing to do' })
-    expect(pending()).toEqual([])
+    // Its candidate for the main Session waits as before; the report ends the ticket without taking the message up.
+    expect(pending()).toEqual(['2'])
   })
   it('sends to Eval at a merge a message that reached the worker after its last step, which no step took before its turn ended', () => {
     const h = harness()
@@ -1534,7 +1567,9 @@ describe('what a worker read', () => {
       h.tick(1); h.engine.inputsDelivered(ticketId, assignmentId, [message])
       if (taken) h.read(ticketId)
       h.tick(1); h.engine.report(ticketId, { state: 'dropped', summary: 'Nothing to do' })
-      expect(pending()).toEqual(taken ? [] : ['2'])
+      // Its candidate for the main Session waits whether a step took it or not; only the worker's account of it changes.
+      expect(pending()).toEqual(['2'])
+      expect(h.repo.triggers.disposition('2')!.fanout).toEqual(taken ? [ticketId] : [])
     }
   })
   it('counts a message a step took before a restart cut its turn off as read only once the restarted worker reports', () => {
@@ -1547,7 +1582,9 @@ describe('what a worker read', () => {
       h.tick(1); h.engine.assignmentInterrupted(ticketId, runningAssignment(h.repo.tickets.get(ticketId)!)!.id); h.settle()
       if (reported) { h.tick(1); h.engine.report(ticketId, { state: 'progress', summary: 'Recovered' }) }
       h.tick(1); h.engine.stopTicket(ticketId, 'not needed')
-      expect(h.repo.threads.get('chat:t1')!.pending).toEqual(reported ? [] : ['2'])
+      // The message keeps its candidate for the main Session, which the stop left to it; the worker's account alone differed.
+      expect(h.repo.threads.get('chat:t1')!.pending).toEqual(['2'])
+      expect(h.repo.tickets.get(ticketId)!.ended).toMatchObject({ by: 'human', outcome: 'stopped' })
     }
   })
 })

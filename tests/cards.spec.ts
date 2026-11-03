@@ -40,10 +40,11 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session only stops the work on request', 'orchestrator',
     ['goes straight to its workers and resumes an ended ticket a person did not stop', 'that ticket\'s worker decides it'],
     ['arrive to you as candidates too', 'dispatch says when it needs a tool call']],
-  ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session only stops the work on request', 'dispatch',
-    ['A follow_up notice reports a person\'s message that already reached the workers it lists', 'do not forward it a second time',
-      'act on a follow_up only to stop the work when the person asks', 'never accept, attach or requeue it',
-      'arrives as a candidate with handed_back'],
+  ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session sees it too and acts only when the ticket does not cover it', 'dispatch',
+    ['A follow_up notice reports a person\'s message that already reached the workers it lists', 'you do not forward it again',
+      'You see the same message yourself as a candidate', 'ignore it when a listed ticket plainly covers it',
+      'Never accept it as a new ticket while a worker still decides it', 'arrives as a candidate with handed_back',
+      'orchestrator_ticket_hold', 'orchestrator_ticket_release'],
     ['so it needs no decision', 'asks for new work beyond the ticket (orchestrator_ticket_accept']],
   ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session only stops the work on request', 'subscriptions',
     ['the ticket\'s worker decides whether it belongs to the ticket and hands back what does not']],
@@ -73,7 +74,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
       'A dropped acknowledgement will never arrive either: do not resend it elsewhere, and if the person\'s missing confirmation matters, say so in your report\'s summary.']],
   ['The main Session has no tool that messages a worker', 'replies',
     ['wait for the worker\'s report, or request one with orchestrator_ticket_request_status when the ticket is idle'], ['ask the worker']],
-  ['The main Session has no tool that messages a worker', 'shared', ['leave those activities to workers'], ['delegate']],
+  ['The main Session has no tool that messages a worker', 'shared', ['leaves worker blockers and technical discussion to workers'], ['delegate']],
   ['The main Session has no tool that messages a worker', 'cli', ['leaves other context reads and local downloads to workers'], ['delegate']],
   ['The main Session has no tool that messages a worker', 'dispatch', [], ['Ask a worker']],
   ['The main Session has no tool that messages a worker', 'handoff-orchestrator', [], ['ask the worker']],
@@ -81,7 +82,9 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['A ticket owner\'s decision is a structured attention request, not progress', 'handoff',
     ['Ticket handoff contract:', 'An empty final preserves a successful report', 'budget errors alone do not authorize an IM message']],
   ['An Executor asks through human_action and clears the question explicitly', 'handoff-worker', ['human_action:null or a ready report clears it', 'state may remain progress']],
-  ['The main Session investigates nothing outside an assessment', 'dispatch', ['Outside proactive assessment, do not follow context references']],
+  ['The main Session investigates only inside an assessment or an answer', 'dispatch', ['Reading code to assess a candidate or to answer a question is your work']],
+  ['The main Session investigates only inside an assessment or an answer', 'shared', ['While assessing a candidate or preparing an answer, the orchestrator may read code, logs, databases, CI results and linked documents']],
+  ['A question is answered with its evidence, not ticketed', 'dispatch', ['is answered, not ticketed', 'ignore with reason chatter', 'ignore with reason duplicate']],
   ['A UI change carries before-and-after evidence, as a delivery requirement the team can change', 'team/delivery',
     ['PR description must contain BOTH Before and After visual evidence', 'same scenario, viewport, theme and relevant UI state', 'After-only evidence is incomplete',
       'not a mockup presented as the previous implementation', 'baseline and changed revision identified', 'do not claim the UI PR is ready']],
@@ -136,7 +139,7 @@ it('shows a trigger and a ticket as cards with a short preview and references to
   const threads = [{ thread: 'github:42', bound: true as const }]
   const batch = [{ ...trigger, id: 'request-2', text: 'Also the flaky one.' }]
   expect(ticketDetails(ticket, threads, batch)).toEqual({ ticket_id: 'ticket-1', title: 'Inspect failing check',
-    state: 'person/review', strength: 'explicit', pr_number: 42, read: 'ticket/ticket-1', trigger_id: 'request-1', decision_id: 'd1',
+    state: 'review/running', strength: 'explicit', pr_number: 42, read: 'ticket/ticket-1', trigger_id: 'request-1', decision_id: 'd1',
     batch: [{ trigger_id: 'request-2', from: 'alice', at: trigger.at, preview: 'Also the flaky one.', read: 'trigger/request-2' }],
     threads, directory: '/worktrees/ticket-1', scope: mandate.scope, requested_by: 'alice', inputs: { items: [] },
     assignments: { items: [{ id: 'a1', state: 'running', at: '2026-09-09T00:00:00Z', report: { state: 'ready', at: '', preview: expect.stringMatching(/^The focused/),
@@ -158,7 +161,7 @@ it('shows a trigger and a ticket as cards with a short preview and references to
 it('shows a ticket card\'s state from a closed set: the open ticket\'s stage, the ended ticket\'s outcome', () => {
   const report = (state: string) => ({ ...ticket, assignments: [{ ...ticket.assignments[0]!, report: { state, summary: '', at: '' } }] }) as Ticket
   const cases: [Ticket, string][] = [
-    [ticket, 'person/review'], [report('blocked'), 'person/blocked'], [report('failed'), 'person/failed'], [report('waiting'), 'idle'], [report('progress'), 'working'],
+    [ticket, 'review/running'], [report('blocked'), 'person/blocked'], [report('failed'), 'person/failed'], [report('waiting'), 'idle'], [report('progress'), 'working'],
     [{ ...ticket, attention: { id: 'q', question: 'Desktop too?' } }, 'person/answer'], [{ ...ticket, delivery: { error: 'gone', at: '' } }, 'person/delivery'],
     [{ ...ticket, assignments: [{ ...ticket.assignments[0]!, state: 'pending', report: undefined }] }, 'working/queued'],
     [{ ...ticket, ended: { at: 'e', by: 'human', reason: 'Not needed after all', outcome: 'stopped' } }, 'stopped'],

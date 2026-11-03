@@ -9,8 +9,10 @@ export type ReceiveResult = 'stored' | 'duplicate' | 'filtered'
 
 /**
  * Ingests incoming triggers from Sources, deduplicating and filtering them against SourceScope before recording thread correlations.
- * Fans listened triggers out to subscribed tickets via Tickets and queues for Eval, on its primary thread, every trigger no
- * ticket's worker decides (see `followupOwners`).
+ * Fans listened triggers out to subscribed tickets via Tickets, then queues every person's trigger for Eval on its primary
+ * thread, whether or not a ticket's worker already decides it (see `followupOwners`): the main Session reads each message and
+ * decides what to do with it — let the owner keep it, attach it elsewhere, or send it to a ticket's worker — so a follow-up is
+ * never silently consumed. Bot and CI triggers still reach Eval only while no ticket decides them.
  * Engine delegates trigger reception to this part.
  */
 export class Intake extends EnginePart {
@@ -53,9 +55,10 @@ export class Intake extends EnginePart {
     const fanout = [...reached.keys()], context = fanout.filter(id => reached.get(id)!.context)
     const disposition = { fanout, ...context.length ? { context } : {}, at }
     this.repo.triggers.saveDisposition(trigger.id, disposition)
-    // A person's message that no ticket decides, such as one that reached only tickets a person stopped or that follow the
-    // Thread for context, and every bot's, goes to Eval.
-    if (!this.owners(trigger).length) this.queueForEval(trigger)
+    // A person's message goes to Eval on its Thread even while a ticket's worker decides it: the main Session reads every
+    // message, and a follow-up it sends elsewhere, or attaches with a different ticket, must not have been consumed already.
+    // A bot's or CI's goes there only while no ticket decides it.
+    if (trigger.human || !this.owners(trigger).length) this.queueForEval(trigger)
     for (const ticketId of fanout) this.tickets.wake(ticketId)
     this.emit('trigger.received', { triggerId: trigger.id, threads: trigger.threads.map(threadKey) })
     return 'stored'

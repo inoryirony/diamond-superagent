@@ -1,10 +1,11 @@
 /** What the Executor and its workers report about the Assignments that run tickets. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, liveTicket, runningAssignment } from './model.ts'
-import type { ReportState, Ticket } from './model.ts'
+import { latestAssignment, liveTicket, reportHistory, reviewsInAttempt, runningAssignment } from './model.ts'
+import type { ReportEntry, ReportEvidence, ReportState, Ticket } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
+import { REVIEW_ROUNDS, type Reviews } from './reviews.ts'
 import { automatic, type Tickets } from './tickets.ts'
 
 /** What an Assignment reports: a worker's report, or the Executor's own (`waiting` after an idle turn, `failed` after an error). */
@@ -17,6 +18,8 @@ export interface WorkerReport {
   askedBy?: string
   /** The person's question this report answers, which the worker thereby takes up; authorizes the main Session to send an answer reply. */
   answers?: string
+  /** What the worker ran or read to show its result, kept on the report's entry in the ledger; a ready report must bring it. */
+  evidence?: ReportEvidence[]
 }
 const RECOVERY_NOTE = 'The host restarted during this ticket. Inspect the current worktree, git history and GitHub state before continuing. Do not repeat an already completed external operation. Finish the original assignment and report its status.'
 
@@ -28,7 +31,10 @@ const RECOVERY_NOTE = 'The host restarted during this ticket. Inspect the curren
  * Executor's lifecycle callbacks and its workers' reports here.
  */
 export class Assignments extends EnginePart {
+  private reviews: Reviews | undefined
   constructor(options: EngineOptions, private readonly tickets: Tickets, private readonly replies: Replies) { super(options) }
+  /** Connects the part that reviews results; `Tickets` creates it after this part, since both read each other's verdicts. */
+  use(reviews: Reviews): void { this.reviews = reviews }
 
   /** Marks a non-ended assignment running, queues delivery of waiting undelivered inputs on an open ticket, and emits `assignment.started`. */
   started(ticketId: string, assignmentId: string): void {
@@ -95,8 +101,9 @@ export class Assignments extends EnginePart {
    * inputs, and ending the ticket when `dropped` or when `ready` and not waiting on followed threads (`followsDone`).
    * @throws UserError for an unknown or ended ticket, an ended assignment, a question combined with a ready result or answer,
    * or a question/answer referencing a non-human or unreached trigger.
+   * @param options.by - who wrote the report: the worker (default), or the host closing a turn on the worker's behalf.
    */
-  report(ticketId: string, report: WorkerReport): Ticket {
+  report(ticketId: string, report: WorkerReport, { by = 'worker' }: { by?: ReportEntry['by'] } = {}): Ticket {
     const ticket = this.require(ticketId)
     if (!liveTicket(ticket)) throw new UserError('ticketEnded')
     if (report.question && (report.state === 'ready' || report.answers)) throw new UserError('questionWithResult')
@@ -119,12 +126,31 @@ export class Assignments extends EnginePart {
     else delete ticket.attention
     // A replaced or cleared attention question withdraws any pending unsent reply for the previous question from the outbox.
     if (previous && previous.id !== attention?.id) this.replies.withdrawAttention(previous.id)
+    // The ledger keeps every report with its author; `report` stays the mirror of the last one that the rest of the code reads.
+    assignment.reports = [...reportHistory(assignment), { by, state: report.state, summary: report.summary, at, ...report.evidence?.length ? { evidence: report.evidence } : {} }]
     assignment.report = { state: report.state, summary: report.summary, at }
     ticket.updatedAt = at
     if (report.answers && !ticket.answers?.includes(report.answers)) ticket.answers = [...ticket.answers ?? [], report.answers]
     if (report.answers) this.takeUp(ticketId, report.answers)
     if (report.state === 'blocked' || report.state === 'failed') ticket.undelivered = ticket.undelivered.filter(id => !automatic(ticket.inputs.find(input => input.id === id)))
     this.repo.tickets.save(ticket)
+    // With reviews on, a ready result is judged before the ticket delivers or ends it: the review then passes it on as the
+    // report would have, or returns it to the worker with findings.
+    if (report.state === 'ready' && this.reviews?.required(ticket)) {
+      // A second ready report from the same Assignment supersedes the review the first one started: that review judged a
+      // result this report replaced, so leaving it running would park it unfinished with nobody left to end it.
+      this.reviews.supersede(ticket, assignment.id)
+      this.reviews.start(ticket, assignment); return this.require(ticketId)
+    }
+    // Reviews are on but this attempt's rounds are spent, so no review judged this result. It still ends the ticket as before,
+    // marked `unreviewed` so nobody reads it as a reviewed one, and the main Session is told through the same event the last
+    // returned round raises. Only rounds that gave a verdict count (see `reviewsInAttempt`), so a review that could not run never lands here.
+    if (report.state === 'ready' && this.options.executor.reviews?.() === true && reviewsInAttempt(ticket) >= REVIEW_ROUNDS) {
+      const last = ticket.reviews?.at(-1)
+      ticket.unreviewed = true
+      this.repo.tickets.save(ticket)
+      this.emit('ticket.reviewRoundsSpent', { ticketId, round: last?.round ?? 0, assignmentId: assignment.id, findings: last?.ended?.findings ?? [] })
+    }
     // A ticket that follows Threads ends with them: a ready report ends it only once followsDone holds, with that outcome.
     const ready = !ticket.follows?.length ? 'completed' : this.tickets.followsDone(ticket)?.outcome
     // A dropped report after a close the ticket deferred ends it as the close did, which its final notice tells.

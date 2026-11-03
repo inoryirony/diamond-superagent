@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, machineOf, resolveDingtalk, resolveFeishuBot, resolveGithub, type Machine, type Probe } from '../src/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -58,16 +58,19 @@ describe('configuration schema', () => {
 
 describe('setup', () => {
   it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
-    const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
-    expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })
-    expect(deployment.github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
-    expect(deployment).not.toHaveProperty('feishu')
+    const github = await resolveGithub(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
+    expect(github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com', repository: 'acme/widgets' })
     // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
-    expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
+    expect((await resolveGithub(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path))?.repository).toBe('acme/widgets')
+  })
+  it('finds no GitHub account, and no problem, when the GitHub Source names neither a repository nor a CLI', async () => {
+    expect(await resolveGithub(machine(), {}, probe, path)).toBeUndefined()
+    expect(await resolveGithub(machine(), undefined, probe, path)).toBeUndefined()
+    expect(await resolveGithub(machine(), { repository: '', cli: '' }, probe, path)).toBeUndefined()
   })
   it('names what setup needs and where it is set', async () => {
     const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>
-      expect(resolveDeployment(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
+      expect(resolveGithub(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
     const repository = 'acme/widgets'
     await needs('github', 'repositoryUnset', {}, { cli: 'gh' })
     await needs('github', 'agentCliUnset', {}, { repository })
@@ -97,5 +100,27 @@ describe('setup', () => {
     await refuses('feishuNoBot')
     program(join(dir, 'bin', 'lark-cli'), 'echo "not configured" >&2; exit 1')
     await refuses('feishuCliFailed', { output: expect.stringContaining('not configured') })
+  })
+  it('reads the DingTalk account from dws, or finds none when the DingTalk Source names neither a CLI nor an open DingTalk ID', async () => {
+    const self = 'open-self-0001'
+    expect(await resolveDingtalk(machine(), {}, probe, path)).toBeUndefined()
+    expect(await resolveDingtalk(machine(), undefined, probe, path)).toBeUndefined()
+    expect(await resolveDingtalk(machine(), { cli: '', openDingtalkId: '' }, probe, path)).toBeUndefined()
+    // Only one of the two fields is set: setup names the one that is missing.
+    await expect(resolveDingtalk(machine(), { openDingtalkId: self }, probe, path)).rejects.toEqual(setupError('dingtalk', 'dingtalkCliUnset'))
+    await expect(resolveDingtalk(machine(), { cli: 'dws' }, probe, path)).rejects.toEqual(setupError('dingtalk', 'dingtalkSelfUnset'))
+    await expect(resolveDingtalk(machine(), { cli: join(dir, 'missing'), openDingtalkId: self }, probe, path))
+      .rejects.toEqual(setupError('dingtalk', 'dingtalkCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }))
+    // A warning line may precede the JSON of both answers.
+    const me = { result: [{ orgEmployeeModel: { userId: 'u1', corpId: 'corp1', orgUserName: 'Alice Zhang' } }] }
+    const dws = (authenticated: boolean): string => `echo 'warning: nested skill'\ncase "$*" in\n  "auth status") echo '{"authenticated":${authenticated}}' ;;\n  "contact user me --format json") echo '${JSON.stringify(me)}' ;;\n  *) exit 1 ;;\nesac`
+    program(join(dir, 'bin', 'dws'), dws(true))
+    expect(await resolveDingtalk(machine(), { cli: 'dws', openDingtalkId: self }, probe, path))
+      .toEqual({ cli: join(dir, 'bin', 'dws'), openDingtalkId: self, userId: 'u1', name: 'Alice Zhang', corpId: 'corp1' })
+    program(join(dir, 'bin', 'dws'), dws(false))
+    await expect(resolveDingtalk(machine(), { cli: 'dws', openDingtalkId: self }, probe, path)).rejects.toEqual(setupError('dingtalk', 'dingtalkSignedOut'))
+    program(join(dir, 'bin', 'dws'), 'echo "boom" >&2; exit 1')
+    await expect(resolveDingtalk(machine(), { cli: 'dws', openDingtalkId: self }, probe, path))
+      .rejects.toEqual(setupError('dingtalk', 'dingtalkSignedOut', { output: expect.stringContaining('boom') }))
   })
 })

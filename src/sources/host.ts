@@ -12,7 +12,11 @@ export const HEALTH_TEXT = {
   setupPending: 'Waiting for the deployment check',
   sourceOff: 'Off',
   feishuCliUnset: 'The Source is on, and its bot lark-cli is not set',
+  dingtalkCliUnset: 'The Source is on, and its dws CLI or your open DingTalk ID is not set',
+  githubUnset: 'The Source is on, and its repository or agent CLI is not set',
   feishuBotMissing: 'Waiting for the Feishu bot',
+  jiraUnset: 'The Source is on, and its base URL or Personal Access Token variable is not set',
+  gitlabUnset: 'The Source is on, and its glab CLI or group is not set',
   pollFailures: '{count} consecutive failed polls; last: {error}',
 } as const
 export type HealthCode = keyof typeof HEALTH_TEXT
@@ -34,10 +38,12 @@ export interface SourceContext {
   readonly ready: Promise<void>
   /** True once setup resolved the repository and accounts; Sources poll only then. */
   configured(): boolean
-  /** Setup problem keeping this Source's account from running; only the Feishu bot check reports one. */
+  /** Setup problem keeping this Source's account from running, from the GitHub or Feishu account check. */
   readonly problem?: SetupProblem | undefined
   /** Returns a Source's configuration while enabled, or undefined while disabled or uninstalled. */
   config<C extends Record<string, unknown>>(kind: string): C | undefined
+  /** Account names the Policy lists as bots on this Source; Jira Server marks no bot accounts, so this list is what tells them apart. */
+  bots(): readonly string[]
   /** Ingests a trigger into the Engine and schedules the next evaluation pass; callers should await completion before advancing read cursors. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
   atomic<T>(work: () => T): T

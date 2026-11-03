@@ -2,7 +2,8 @@
 import { UserError } from './errors.ts'
 import { followupOwners, reached, threadKey } from './model.ts'
 import type { Thread, ThreadRef, Ticket, Trigger } from './model.ts'
-import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, Outbox, Policy, Repositories, SourceScope } from './ports.ts'
+import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, Outbox, Policy, Repositories, ReviewerPort, SourceScope }
+  from './ports.ts'
 
 export interface EngineOptions {
   repo: Repositories
@@ -11,6 +12,8 @@ export interface EngineOptions {
   scope: SourceScope
   assessor: Assessor
   executor: Executor
+  /** Judges a ticket's result before the ticket delivers or ends it; without one, a ready result is the ticket's. */
+  reviewer?: ReviewerPort
   outbox: Outbox
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
   now?: () => string
@@ -26,8 +29,12 @@ export abstract class EnginePart {
   constructor(protected readonly options: EngineOptions) { this.repo = options.repo }
   protected now(): string { return this.options.now?.() ?? new Date().toISOString() }
   protected policy(): Policy { return this.options.policy() }
-  /** The tickets whose worker decides a person's follow-up: see `followupOwners`. */
-  protected owners(trigger: Trigger): string[] { return followupOwners(trigger, this.repo) }
+  /**
+   * The tickets whose worker decides a person's follow-up: see `followupOwners`. An Eval holding the Trigger does not undo
+   * that, since every human message is queued for one now: a ticket that decides the message still decides it, and the main
+   * Session may read the candidate without taking the work.
+   */
+  protected owners(trigger: Trigger): string[] { return followupOwners(trigger, this.repo, { underEval: true }) }
   /** Refuse a main-Session routing of a follow-up a ticket's worker still decides. */
   protected leftToWorkers(trigger: Trigger): void {
     const owners = this.owners(trigger)
@@ -59,6 +66,7 @@ export abstract class EnginePart {
     if (primary.pending.includes(trigger.id) || primary.evaluating?.triggerIds.includes(trigger.id)) return false
     primary.pending.push(trigger.id)
     this.repo.threads.save(primary)
+    if (primary.evaluating) this.emit('trigger.queuedBehindEval', { triggerId: trigger.id, evalId: primary.evaluating.id })
     return true
   }
   protected emit<K extends keyof DomainEvents>(type: K, data: DomainEvents[K]): void {

@@ -33,20 +33,24 @@ export function evalsHealth(store: Store, now = Date.now()): Health {
 }
 /**
  * Builds the operator overview: active system problems, tickets awaiting human action, executor load, and 24-hour trigger flow.
- * @param setup - Setup problem to surface first (where setup stopped, or a Source paused by setup).
+ * @param setup - Setup problems to surface first: the one that stopped setup, and each Source that setup left out.
  */
-export function overview(host: ViewHost, health: HealthMap, policyVersionValue: string, load: ExecutorLoad, setup?: SetupProblem) {
+/** How many finished tickets the overview lists, newest first; the Execution page lists them all. */
+const ENDED_SHOWN = 10
+export function overview(host: ViewHost, health: HealthMap, policyVersionValue: string, load: ExecutorLoad, setup: readonly SetupProblem[] = []) {
   const { store, sources } = host
   const view = snapshot(host)
   const settings = store.settings()
   const now = new Date().toISOString(), since = dayAgo()
   const evaluating = store.threads.active().filter(thread => thread.evaluating)
+  // Whether results are reviewed before a person sees them, which decides where a ready result's ticket shows.
+  const reviewing = settings.executor.reviews
   const instances = sources.instances()
   const running = instances.filter(instance => instance.enabled && instance.installed).map(instance => sourceHealth(sources, instance, health))
   // Exclude source-owned and policy-sync health entries so only core runtime errors surface as `runtime-error`.
   const sourceParts = new Set(instances.flatMap(instance => sources.kind(instance.kind)?.health ?? []))
   const problems = [
-    ...(setup ? [{ kind: 'setup' as const, ...setup }] : []),
+    ...setup.map(problem => ({ kind: 'setup' as const, ...problem })),
     ...(running.length ? [] : [{ kind: 'no-source' as const }]),
     // Only allowed senders can originate work, so empty allowlists mean no request can ever become a ticket.
     ...(anyoneAllowed(settings) ? [] : [{ kind: 'no-allowed' as const }]),
@@ -65,12 +69,21 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
       attempts: item.attempts, error: item.error } })),
   ]
   const open = store.tickets.open().sort(newestFirst)
+  // The board a person reads: what waits on them, what the Executor works on, and what the last day finished with.
+  const person = open.filter(ticket => ticketStage(ticket, reviewing).stage === 'person').map(ticket => ticketRow(view, ticket))
+  const working = open.filter(ticket => ['working', 'review'].includes(ticketStage(ticket, reviewing).stage)).map(ticket => ticketRow(view, ticket))
+  const ended = store.tickets.list().filter(ticket => !!ticket.ended && ticket.ended.at >= since).sort(newestFirst).slice(0, ENDED_SHOWN)
+    .map(ticket => ticketRow(view, ticket))
   const stats = Object.values(store.read.triggerStats(since))
   const received = stats.reduce((sum, item) => sum + item.received, 0), filtered = stats.reduce((sum, item) => sum + item.filtered, 0)
   const judgement = store.read.flow(since)
   return {
     problems,
-    person: open.filter(ticket => ticketStage(ticket).stage === 'person').map(ticket => ticketRow(view, ticket)),
+    person,
+    working,
+    ended,
+    // Tickets a person must act on, rather than a result that passed its review and is waiting to be delivered.
+    needsYou: person.filter(ticket => !('action' in ticket && ticket.action === 'review')).length,
     executor: { ...load, maxWorkers: settings.executor.maxWorkers, idle: open.filter(ticket => ticketStage(ticket).stage === 'idle').length },
     flow: { received, filtered, triggers: received - filtered, judged: judgement.judged, accepted: judgement.accepted,
       evaluating: evaluating.length, dropped: store.read.droppedSince(since) },

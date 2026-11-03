@@ -20,8 +20,9 @@ import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
-import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
-import { ticketCard } from './cards.ts'
+import type { ChannelLinks } from '../sources/kind.ts'
+import { DshExecutor, isReviewerSession, reviewerSessionId, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { evalTitle, followupWhileAssessing, ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
@@ -39,13 +40,17 @@ import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
+import { dingtalkSettings } from '../sources/dingtalk.ts'
+import { resolveNames } from '../sources/dingtalk-names.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
-import { Sessions } from './sessions.ts'
+import { Sessions, evalSessionId } from './sessions.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
+import { reviewerTools, type ReviewerToolsHost } from './tools/reviewer.ts'
+import { Reviewers } from './reviewers.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
@@ -66,6 +71,8 @@ export class Runtime extends Service implements SourceHost {
   readonly sessions: Sessions
   readonly settings: Settings
   readonly executor: DshExecutor
+  /** The phase that reviews a ticket's result before the ticket delivers it; its verdict comes through the Engine. */
+  readonly reviewers: Reviewers
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
   readonly engine: Engine
@@ -81,7 +88,7 @@ export class Runtime extends Service implements SourceHost {
   private closingFlag = false
   private stopping?: Promise<void>
   private readonly sourceDeps: SourceContextDeps
-  private readonly toolHost: MainToolsHost & ExecutorToolsHost
+  private readonly toolHost: MainToolsHost & ExecutorToolsHost & ReviewerToolsHost
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
@@ -100,8 +107,11 @@ export class Runtime extends Service implements SourceHost {
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
-      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
-      const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
+      const github = () => setup.configured() && !!setup.deployment.github
+      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu, github)
+      // The main Session's ID carries the directory it works in, so changing the configured workspace starts a Session in the
+      // new directory rather than reusing one pinned to the old: DSH fixes a Session's workspace when it is created.
+      const masterId = this.masterId = `orchestrator-${key(this.masterWorkspace())}`
       store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
@@ -111,30 +121,50 @@ export class Runtime extends Service implements SourceHost {
         if (kind.policy?.sync) void this.ready?.then(() => this.settings.syncable().includes(kind.kind) ? this.settings.sync(kind.kind) : undefined)
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
-      })
+      }, () => ({ get: name => store.get(name), set: (name, value) => { if (value === undefined) store.delete(name); else store.set(name, value) } }))
       const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
-        feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
+        feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link,
+        dingtalkNames: nicks => resolveNames(commands, store, dingtalkSettings(sources).openDingtalkId, nicks),
+        threadContext: trigger => sources.threadContext(trigger) }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
-        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        tools: (agent, ticket) => !ticket ? mainTools(this.toolHost, agent)
+          : isReviewerSession(agent.id) ? reviewerTools(this.toolHost, ticket.id, agent) : executorTools(this.toolHost, ticket, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
-      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
+      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker', { state: 'ready', detail: 'No review is failing' }), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
-        deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
+        // Each Eval is assessed in its own orchestrator Session, created on first delivery and kept afterwards for people to read.
+        deliver: async (evalId, id, text) => {
+          await sessions.ensure(evalSessionId(evalId), this.masterWorkspace(), evalTitle(store, evalId), 'orchestrator')
+          await sessions.prompt(evalSessionId(evalId), id, text, 'steer')
+        }, candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
+      // A review runs in a Session of its own beside the workers, outside their slots, and hands its verdict to the Engine,
+      // which passes the result on or sends the findings back to the worker; with reviews off, a result is the ticket's.
+      const reviewers = this.reviewers = new Reviewers({ get engine() { return runtime.engine }, store, effects, sessions,
+        closing: () => this.closing(), paused: () => this.paused(), lifetime: this.lifetime, subprocess: ctx.subprocess,
+        environment: ticket => this.ticketEnvironment(ticket), directory: ticket => ticket.execution?.directory ?? machine.stateDir,
+        note: (ticketId, text) => { this.engine.note(ticketId, text) },
+        // The deploy phase needs commands to run; the review alone needs only a Reviewer Session.
+        deploy: () => { const e = store.settings().executor; return e.deploy ? { command: e.deployCommand, e2e: e.e2eCommand } : undefined } })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
-      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
+      // The Executor reviews results as long as the settings say so, read at each report: the phase is configurable at runtime.
+      executor.reviews = () => store.settings().executor.reviews
+      // The Reviewer is wired unconditionally: `Reviews.required` reads `executor.reviews` when a result arrives, so switching the
+      // phase off and on again in the panel takes effect without a restart. Passing it only when it was on at startup left an
+      // installation that started with reviews off unable to review anything until it restarted.
+      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor, reviewer: reviewers,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
@@ -144,11 +174,19 @@ export class Runtime extends Service implements SourceHost {
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
           if (followup) sessions.relay(followup.id, followup.text)
+          // A message on a Thread under assessment is steered into that Eval's Session, which may route it at once; one it leaves
+          // alone waits for the next Eval, so a Session that does not exist yet or refuses it loses nothing.
+          if (event.type === 'trigger.queuedBehindEval') {
+            const trigger = store.triggers.get(event.data.triggerId)
+            if (trigger) void sessions.prompt(evalSessionId(event.data.evalId), `steer:${trigger.id}`, JSON.stringify(followupWhileAssessing(trigger)), 'steer')
+              .catch((error: unknown) => { ctx.logger.warn('dsh-superagent could not steer trigger %s into Eval %s: %s', trigger.id, event.data.evalId, String(error)) })
+          }
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
-          if (ended && setup.configured()) {
+          const repository = setup.configured() ? setup.deployment.github?.repository : undefined
+          if (ended && repository) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
-            for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+            for (const message of pullEndNotices(ended, request, repository)) outbox.send(message)
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
@@ -158,9 +196,15 @@ export class Runtime extends Service implements SourceHost {
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
+        get problems() { return setup.problems }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+        // A deployment runs a GitHub account, a GitLab one, or neither; a report names its change on whichever exists, and the
+        // tool skips the account it does not have instead of throwing with the whole report.
+        get hasGithub() { return !!setup.configured() && !!setup.deployment.github },
+        get hasGitlab() { return !!setup.configured() && !!setup.deployment.gitlab },
+        commands,
+        get gitlabContext() { return runtime.context({ kind: 'gitlab', health: ['gitlab'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
@@ -177,12 +221,10 @@ export class Runtime extends Service implements SourceHost {
   /** Resolved deployment; throws while waiting for setup (`!configured()`). */
   get deployment(): Deployment { return this.setup.deployment }
   configured(): boolean { return this.setup.configured() }
-  get setupProblem(): SetupProblem | undefined { return this.setup.problem }
-  /** Why the Feishu bot is unavailable even though the Feishu Source configures a CLI. */
-  get feishuProblem(): SetupProblem | undefined { return this.setup.feishuProblem }
+  get problems(): readonly SetupProblem[] { return this.setup.problems }
   links(): LinkTarget {
     const resolved = this.setup.configured() ? this.setup.deployment : undefined
-    const links = resolved ? { repository: resolved.repository, ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
+    const links: ChannelLinks = { ...resolved?.github ? { github: resolved.github } : {}, ...resolved?.feishu ? { feishu: resolved.feishu } : {}, ...resolved?.dingtalk ? { dingtalk: resolved.dingtalk } : {} }
     return channel => this.sources.link(channel, links)
   }
   ticketEnvironment(ticket: Ticket): Variable[] {
@@ -196,6 +238,12 @@ export class Runtime extends Service implements SourceHost {
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
   private closing(): boolean { return this.closingFlag }
+  /**
+   * The directory the main Session works in: the configured workspace, else the state directory. A question about a named tool,
+   * service or repository is answered by reading it, which needs the directories that hold them — the state directory holds none.
+   * Read live, so a changed workspace applies to the next Session created.
+   */
+  private masterWorkspace(): string { return this.store.settings().executor.workspace || this.machine.stateDir }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
   private paused(): boolean { return !this.setup.configured() || this.store.settings().paused }
   private async initialize(): Promise<void> {
@@ -207,11 +255,12 @@ export class Runtime extends Service implements SourceHost {
     }
     this.sessions.install()
     this.executor.install()
-    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    await this.sessions.ensure(this.masterId, this.masterWorkspace(), 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
     this.executor.resume()
+    this.reviewers.resume()
     this.passes.start()
     this.effects.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
@@ -221,7 +270,7 @@ export class Runtime extends Service implements SourceHost {
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
       get deployment() { return setup.deployment },
-      get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
+      get problems() { return setup.problems },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
       checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
   }
@@ -231,7 +280,10 @@ export class Runtime extends Service implements SourceHost {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
       this.assessor.stop()
-      const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
+      // Every Session dsh-superagent keeps: the main one, the Evals' and Reviews', and each ticket's worker.
+      const ids = [this.masterId, ...this.store.threads.active().flatMap(thread => thread.evaluating ? [evalSessionId(thread.evaluating.id)] : []),
+        ...this.store.tickets.list().flatMap(ticket => [{ id: workerSessionId(ticket.id) },
+          ...(ticket.reviews ?? []).filter(review => !review.ended).map(review => ({ id: reviewerSessionId(ticket.id, review.round) }))]).map(item => item.id)]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])

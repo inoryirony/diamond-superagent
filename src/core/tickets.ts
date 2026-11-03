@@ -1,12 +1,14 @@
 /** Tickets: their lifecycle from an accept to their end, their Subscriptions and their Inputs. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
+import { STALL_MS, holdsInput, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, stalledSince, threadKey,
+  waitsForPerson } from './model.ts'
 import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
   Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
+import type { Reviews } from './reviews.ts'
 import { canRetry } from './stage.ts'
 
 const sameChannel = (a: ChannelRef, b: ChannelRef): boolean => JSON.stringify(a) === JSON.stringify(b)
@@ -27,7 +29,10 @@ const STATUS_REQUEST = 'Report the current ticket status with orchestrator_repor
  * Intake, Evals, Assignments, and Engine delegate ticket and subscription mutations here.
  */
 export class Tickets extends EnginePart {
+  private reviews: Reviews | undefined
   constructor(options: EngineOptions, private readonly replies: Replies) { super(options) }
+  /** Connects the part that reviews results, which reads the ticket's reviews to end it; `Engine` creates it after this part. */
+  use(reviews: Reviews): void { this.reviews = reviews }
 
   /**
    * Create the ticket an accept decided, under `mandate`, with the Channels and Threads of the Eval's Triggers, its first
@@ -101,13 +106,15 @@ export class Tickets extends EnginePart {
   }
   /**
    * The Trigger to attach to a ticket, once the ticket may take it.
-   * @throws UserError when the trigger or ticket is unknown, a ticket's worker still decides the trigger, a person stopped the ticket, or an ended ticket's Mandate no longer revalidates.
+   * @throws UserError when the trigger or ticket is unknown, a person stopped the ticket, or an ended ticket's Mandate no
+   * longer revalidates. A follow-up that reached another ticket is held there: the one it reached, or a person, moves it.
    */
   attachable(ticketId: string, triggerId: string): Trigger {
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
-    // A follow-up that reached a ticket goes elsewhere only once the workers that decide it hand it back.
-    this.leftToWorkers(trigger)
+    // Attaching the message to a ticket that already decides it grants nothing new; sending it to a different ticket would
+    // take it from the workers that decide it, so only a person may do that.
+    if (!this.owners(trigger).includes(ticketId)) this.leftToWorkers(trigger)
     const current = this.require(ticketId)
     if (current.ended?.by === 'human') throw new UserError('ticketStopped')
     if (!liveTicket(current) && !this.policy().revalidate(current.mandate)) throw new UserError('mandateRevoked')
@@ -150,8 +157,51 @@ export class Tickets extends EnginePart {
   requestStatus(ticketId: string): boolean {
     const ticket = this.require(ticketId)
     if (!liveTicket(ticket) || runningAssignment(ticket)?.report?.state !== 'waiting') return false
-    this.addInput(ticket, { id: `status:${ticketId}:${ticket.updatedAt}`, kind: 'text', text: STATUS_REQUEST, at: this.now() })
+    this.askStatus(ticket)
     return true
+  }
+  /** Queue the status-only request for a ticket's worker; shared by a person's request and the host's probe of a stalled worker. */
+  private askStatus(ticket: Ticket): void {
+    this.addInput(ticket, { id: `status:${ticket.id}:${ticket.updatedAt}`, kind: 'text', text: STATUS_REQUEST, at: this.now() })
+  }
+  /**
+   * Watches one open ticket's running worker for silence (see `stalledSince`). The first time it is silent past `STALL_MS` the
+   * worker is asked for its status and `probedAt` records when; if it is still silent `STALL_MS` after that probe, the main
+   * Session is told with `ticket.stalled`. Nothing ends or changes state. After telling, `probedAt` moves to `now`, so one
+   * silence raises one event per `STALL_MS` rather than one per pass; a worker that speaks again moves its anchor past `probedAt`
+   * and is probed afresh.
+   */
+  stall(ticketId: string, now: string): void {
+    const ticket = this.repo.tickets.get(ticketId)
+    const assignment = ticket && liveTicket(ticket) ? runningAssignment(ticket) : undefined
+    const anchor = assignment && stalledSince(assignment, now)
+    if (!ticket || !assignment || !anchor) return
+    if (!assignment.probedAt || Date.parse(assignment.probedAt) < Date.parse(anchor)) {
+      assignment.probedAt = now
+      this.repo.tickets.save(ticket)
+      this.askStatus(ticket)
+      return
+    }
+    if (Date.parse(assignment.probedAt) >= Date.parse(now) - STALL_MS) return
+    assignment.probedAt = now; ticket.updatedAt = now
+    this.repo.tickets.save(ticket)
+    this.emit('ticket.stalled', { ticketId, assignmentId: assignment.id, idleForMs: Date.parse(now) - Date.parse(anchor) })
+  }
+  /**
+   * Watches one held ticket for a conflict nobody settled by its `dueAt`: it emits `ticket.holdDue` so the main Session asks
+   * the people again or escalates to the operator, moves `dueAt` on by the same wait, and records that it asked. Nothing changes
+   * otherwise: only a release lifts the hold.
+   */
+  holdDue(ticketId: string, now: string): void {
+    const ticket = this.repo.tickets.get(ticketId)
+    const hold = ticket?.hold
+    if (!ticket || !hold || hold.released || !hold.dueAt || hold.dueAt > now) return
+    const waited = Date.parse(hold.dueAt) - Date.parse(hold.at)
+    hold.dueAt = new Date(Date.parse(now) + Math.max(waited, 60_000)).toISOString()
+    hold.remindedAt = now
+    ticket.updatedAt = now
+    this.repo.tickets.save(ticket)
+    this.emit('ticket.holdDue', { ticketId, question: hold.question, ...(hold.remindedAt ? { askedAt: hold.remindedAt } : {}) })
   }
   /**
    * Stops a ticket on behalf of a human, ending any active assignments.
@@ -160,6 +210,73 @@ export class Tickets extends EnginePart {
   stop(ticketId: string, reason?: string): Ticket {
     this.end(ticketId, 'human', 'stopped', this.now(), reason)
     return this.require(ticketId)
+  }
+  /**
+   * Park the inputs a conflict is about: two conversations gave the ticket opposite directions, and the main Session does not
+   * choose between them. Only the named Inputs wait (`see holdsInput`); the rest of the ticket keeps working. The question
+   * names both directions, each with who gave it and `options` a release may name. Holding one already held replaces it.
+   * @throws UserError when the ticket is unknown or ended.
+   */
+  hold(ticketId: string, hold: { question: string; inputs?: string[]; options?: { id: string; text: string; by: string }[];
+    triggerId?: string; dueAt?: string }): Ticket {
+    const ticket = this.require(ticketId)
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    const at = this.now()
+    ticket.hold = { id: key('hold', ticketId, at), question: hold.question, inputs: hold.inputs ?? [],
+      ...hold.options?.length ? { options: hold.options } : {}, ...(hold.triggerId ? { triggerId: hold.triggerId } : {}),
+      ...(hold.dueAt ? { dueAt: hold.dueAt } : {}), at }
+    ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+    return ticket
+  }
+  /**
+   * Settle a ticket's hold: the direction that stands reaches the worker as an Input of its own ahead of what waited, so it
+   * acts on the settlement rather than the conflict, and the Inputs the hold locked become eligible again. It is delivered
+   * even though the conflict waited on a person: the release is that person's answer. A pending Assignment starts here; one
+   * whose worker's turn ended is started by the caller, through `wake`.
+   * @throws UserError when the ticket is unknown or not held.
+   */
+  release(ticketId: string, resolution: string, by: 'person' | 'orchestrator', option?: string, triggerId?: string): Ticket {
+    const ticket = this.require(ticketId)
+    if (!ticket.hold || ticket.hold.released) throw new UserError('notHeld')
+    const at = this.now()
+    const released = ticket.hold
+    ticket.hold = { ...released, released: { at, resolution, by, ...(option ? { option } : {}), ...(triggerId ? { triggerId } : {}) } }
+    ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+    // The release is what the wait was for, and it bypasses the hold it settles; what it locked follows on the normal path.
+    const input: TicketInput = { id: key('input', ticketId, 'hold', released.id, 'released', at), kind: 'text',
+      text: `The question this ticket was held on is settled: ${resolution}`, at }
+    if (ticket.inputs.some(existing => existing.id === input.id)) return this.require(ticketId)
+    ticket.inputs.push(input); ticket.undelivered.push(input.id)
+    this.repo.tickets.save(ticket)
+    const running = runningAssignment(ticket), latest = latestAssignment(ticket)
+    if (running) this.options.executor.deliver(ticket, running)
+    else if (latest?.state === 'pending') this.options.executor.start(ticket, latest)
+    return this.require(ticketId)
+  }
+  /**
+   * Starts a fresh assignment on a live ticket whose review rounds are spent, with `instruction` as its first input, so the
+   * main Session can act on what the reviewer kept finding instead of leaving the work parked. The worker that failed ends.
+   * @throws UserError when the ticket is unknown, ended, or has a review still running.
+   */
+  restartReviewSpent(ticketId: string, instruction: string): Ticket {
+    const ticket = this.require(ticketId)
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    if (ticket.reviews?.some(review => !review.ended)) throw new UserError('reviewRunning')
+    const latest = latestAssignment(ticket)
+    if (latest) {
+      this.endAssignment(ticket, latest, 'restarted')
+      this.requeueUntaken(ticket, latest)
+    }
+    const assignment = this.newAssignment(ticket)
+    const at = this.now()
+    const input: TicketInput = { id: key('input', ticketId, 'restart', assignment.id), kind: 'text', text: instruction, at }
+    ticket.inputs.push(input); ticket.undelivered.push(input.id); ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+    if (latest) this.options.executor.stop(ticket, latest, 'restarted')
+    this.options.executor.start(ticket, assignment)
+    return ticket
   }
   /**
    * Ends the stalled assignment of a retryable open ticket (`failed`, `blocked`, or failed input delivery) and starts a new one.
@@ -234,8 +351,9 @@ export class Tickets extends EnginePart {
   addInput(ticket: Ticket, input: TicketInput): void {
     if (ticket.inputs.some(existing => existing.id === input.id)) return
     ticket.inputs.push(input); ticket.updatedAt = this.now()
-    // Hold back automated inputs while the worker is waiting on a person.
-    const held = liveTicket(ticket) && automatic(input) && waitsForPerson(ticket)
+    // An automated Input waits while the worker waits on a person, and one a hold names waits until the conflict is settled;
+    // the conflict's other work does not.
+    const held = liveTicket(ticket) && (automatic(input) && waitsForPerson(ticket) || holdsInput(ticket, input))
     if (!held) ticket.undelivered.push(input.id)
     this.repo.tickets.save(ticket)
     if (!liveTicket(ticket) || held) return
@@ -378,8 +496,9 @@ export class Tickets extends EnginePart {
     return report?.state !== 'ready' || ticket.undelivered.length > 0 || later
   }
   /** Add a pending Assignment; a failed delivery to the one before it no longer concerns the ticket. */
-  private newAssignment(ticket: Ticket): Assignment {
-    const assignment: Assignment = { id: key('assignment', ticket.id, String(ticket.assignments.length)), state: 'pending', createdAt: this.now() }
+  private newAssignment(ticket: Ticket, revises = false): Assignment {
+    const assignment: Assignment = { id: key('assignment', ticket.id, String(ticket.assignments.length)), state: 'pending', createdAt: this.now(),
+      ...revises ? { revises: true as const } : {} }
     ticket.assignments.push(assignment)
     delete ticket.delivery
     return assignment
@@ -398,6 +517,43 @@ export class Tickets extends EnginePart {
     const at = this.now()
     this.addInput(ticket, { id: key('input', ticketId, 'note', at, text), kind: 'note', text, at })
     return this.require(ticketId)
+  }
+  /**
+   * Finish a ticket whose result a review passed: end it when its work is done with the Threads it follows, as a ready
+   * report would have at `at`; a ticket still following open Threads stays open and ends when they close.
+   */
+  finishReviewed(ticketId: string, at: string): void {
+    const ticket = this.repo.tickets.get(ticketId)
+    if (!ticket || !liveTicket(ticket)) return
+    const done = !ticket.follows?.length ? { outcome: 'completed' as const, at } : this.followsDone(ticket)
+    // The reviewed result is the ticket's result, as a ready report would have been: what `unfinished` asks about the work
+    // after the close does not apply, and the report that asked for the review is not work left unfinished.
+    if (!done) return
+    const resumed = Date.parse(latestAssignment(ticket)?.createdAt ?? '') > Date.parse(at)
+    this.end(ticketId, 'executor', done.outcome, resumed ? this.now() : done.at)
+  }
+  /**
+   * Send a review's findings back to the worker as an Input, on a new Assignment of the same ticket, so it revises the same
+   * work; the ticket then keeps its Assignment's new ready result for the next review.
+   */
+  returned(ticketId: string, report: { summary: string; findings?: string[] }): void {
+    const ticket = this.require(ticketId)
+    const latest = latestAssignment(ticket)
+    if (!latest) throw new UserError('unknownAssignment')
+    this.endAssignment(ticket, latest, 'returned')
+    this.requeueUntaken(ticket, latest)
+    // It revises the same work, so the review rounds of this attempt carry on rather than starting over.
+    const assignment = this.newAssignment(ticket, true)
+    const at = this.now()
+    const text = [`The review returned this ticket's result; revise the same work and report ready again.`, report.summary,
+      ...(report.findings?.length ? ['', ...report.findings.map((finding, index) => `${index + 1}. ${finding}`)] : [])].join('\n')
+    const input: TicketInput = { id: key('input', ticket.id, 'review', assignment.id), kind: 'text', text, at }
+    ticket.inputs.push(input); ticket.undelivered.push(input.id); ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+    // The worker's turn ends for the revision, whoever ends it: the next assignment takes the findings as its first input.
+    const stop = this.options.executor.returned ?? this.options.executor.stop
+    stop.call(this.options.executor, ticket, latest, 'returned')
+    this.options.executor.start(ticket, assignment)
   }
   /**
    * Subscribe an open ticket to a Thread its Executor found related, for context: see `Thread.context`.

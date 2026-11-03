@@ -1,5 +1,6 @@
 /** Execution environment variables exposed to prepare commands and documented in worker Session instructions; never contains credentials. */
 import { join } from 'node:path'
+import { packagePath } from '../infra/paths.ts'
 import type { Ticket, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Settings } from '../policy.ts'
@@ -12,6 +13,8 @@ export const EXECUTOR_VARIABLES: readonly (VariableSpec & { ticket?: true })[] =
   { key: 'DSH_SUPERAGENT_NAME', ticket: true, description: { zh: '工单的短名，也是执行目录的名字', en: 'The ticket\'s short name, also its directory\'s name' } },
   { key: 'DSH_SUPERAGENT_TICKET', ticket: true, description: { zh: '工单 id', en: 'The ticket id' } },
   { key: 'DSH_SUPERAGENT_BLOCKED_COMMANDS', description: { zh: '这个执行环境禁止调用的命令，以空格分隔；不要运行它们', en: 'Commands blocked in this execution environment, separated by spaces; never run them' } },
+  { key: 'DSH_SUPERAGENT_GRAFANA_ENV', description: { zh: '本机 Grafana 凭据文件的路径（含 user= / password= 两行），生产日志查询脚本读取它；为空时脚本自己按环境变量与家目录找', en: 'Path to the local Grafana credential file (holding user= / password= lines) that the production log lookup reads; empty lets the script fall back to its environment variable and home directory' } },
+  { key: 'DSH_SUPERAGENT_SCRIPTS', description: { zh: '这个插件自带的脚本目录（部署检查、端到端检查、生产日志查询）；用 $DSH_SUPERAGENT_SCRIPTS/<name>.sh 调用，不要写死别人的路径', en: 'This plugin\'s own script directory (deploy check, end-to-end check, production log lookup); call $DSH_SUPERAGENT_SCRIPTS/<name>.sh rather than a hard-coded path' } },
 ]
 export interface Variable { key: string; value: string; description: Localized; owner: string }
 
@@ -26,7 +29,12 @@ export function declaredVariables(sources: SourceRegistry, settings?: Settings):
 
 export function environmentOf(input: { deployment: Deployment; sources: SourceRegistry; settings: Settings; ticket?: { id: string; name: string; directory: string }; trigger?: Trigger }): Variable[] {
   const { deployment, sources, settings, ticket, trigger } = input
-  const executor: Record<string, string> = { DSH_SUPERAGENT_BLOCKED_COMMANDS: settings.executor.blockedCommands.join(' '), ...ticket ? { DSH_SUPERAGENT_DIR: ticket.directory, DSH_SUPERAGENT_NAME: ticket.name, DSH_SUPERAGENT_TICKET: ticket.id } : {} }
+  const executor: Record<string, string> = { DSH_SUPERAGENT_BLOCKED_COMMANDS: settings.executor.blockedCommands.join(' '),
+    // Resolved from the installed package rather than a path anyone typed, so each operator's own checkout is used and no
+    // instruction in the prompts has to name a directory that belongs to one machine.
+    DSH_SUPERAGENT_SCRIPTS: packagePath('scripts'),
+    DSH_SUPERAGENT_GRAFANA_ENV: settings.executor.grafanaEnvFile,
+    ...ticket ? { DSH_SUPERAGENT_DIR: ticket.directory, DSH_SUPERAGENT_NAME: ticket.name, DSH_SUPERAGENT_TICKET: ticket.id } : {} }
   const result: Variable[] = EXECUTOR_VARIABLES.filter(spec => !spec.ticket || ticket).map(spec => ({ key: spec.key, value: executor[spec.key] ?? '', description: spec.description, owner: 'executor' }))
   for (const { kind, environment, config } of sources.environments(settings)) {
     const values = environment.values({ deployment, config, ...trigger ? { trigger } : {} })

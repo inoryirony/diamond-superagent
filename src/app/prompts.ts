@@ -2,7 +2,8 @@
 import { z } from 'zod'
 import { UserError, key } from '../core/index.ts'
 import { policyVersion, type Settings, type SettingsOrigin } from '../policy.ts'
-import { masterPrompt, workerPrompt, sharedPrompt, guides, mainAdmissionPolicy, handoffPolicy, teamDefaults, sourceSkills, cliNotes } from './context.ts'
+import { masterPrompt, workerPrompt, reviewerPrompt, sharedPrompt, guides, mainAdmissionPolicy, handoffPolicy, teamDefaults, sourceSkills, cliNotes }
+  from './context.ts'
 import { environmentLines, type Variable } from './execution-environment.ts'
 import { promptsNotice } from './notices.ts'
 import type { Sessions } from './sessions.ts'
@@ -21,9 +22,9 @@ export const SKILL_PREFIX = 'dsh-superagent-'
 const SkillNameSchema = z.string().regex(SKILL_NAME).refine(name => !(Object.keys(sourceSkills) as string[]).includes(name),
   'This name belongs to a built-in skill')
 /** The built-in parts a team may override, by key: both roles' parts, the Source skills, and the generated parts' templates. */
-const PART_KEYS = ['runtime/shared', 'runtime/orchestrator', 'runtime/worker', 'runtime/subscriptions', 'runtime/replies',
+const PART_KEYS = ['runtime/shared', 'runtime/orchestrator', 'runtime/worker', 'runtime/reviewer', 'runtime/subscriptions', 'runtime/replies',
   'runtime/dispatch', 'runtime/work', 'runtime/admission', 'runtime/handoff/orchestrator', 'runtime/handoff/worker', 'runtime/environment',
-  'runtime/policy', 'runtime/policy/none', 'skill/feishu', 'skill/github'] as const
+  'runtime/policy', 'runtime/policy/none', 'skill/feishu', 'skill/github', 'skill/dingtalk'] as const
 export type PartKey = typeof PART_KEYS[number]
 /** A team's text for a built-in part, and `base`, the key of the built-in text it was edited from. */
 const OverrideSchema = z.object({ text: z.string(),
@@ -41,12 +42,13 @@ export interface PromptVersion { revision: number; previousRevision: number | nu
   legacy?: { config: unknown } }
 export const defaultPrompts = (): PromptConfig => ({ ...teamDefaults, skills: {} })
 
+/** The roles a Session runs as: the orchestrator assesses and answers, the worker does the work, the reviewer judges the worker's result. */
+export type Role = 'orchestrator' | 'worker' | 'reviewer'
 const ENVIRONMENT_HEADING = 'Execution environment (from this installation\'s settings; it takes precedence over any repository or account named elsewhere in these instructions; an empty value means that part is not configured here). The prepare command of a ticket directory reads the same variables:'
 const POLICY_HEAD = '## Policy\nPolicy version {version}; accept mode {mode}. The accept mode and the rules decide proactive candidates only: an explicit request is routed as dispatch says, in any mode and whatever the rules.'
-type Role = 'orchestrator' | 'worker'
 /** A built-in part a team may override: the roles that read it, its text, and the placeholders a template's override keeps. */
 interface BuiltInPart { roles: readonly Role[]; text: string; placeholders?: readonly string[] }
-const BOTH: readonly Role[] = ['orchestrator', 'worker'], MAIN: readonly Role[] = ['orchestrator'], WORKER: readonly Role[] = ['worker']
+const BOTH: readonly Role[] = ['orchestrator', 'worker', 'reviewer'], MAIN: readonly Role[] = ['orchestrator'], WORKER: readonly Role[] = ['worker']
 let parts: Readonly<Record<PartKey, BuiltInPart>> | undefined
 /**
  * The built-in parts of both roles' prompts, the two Source skills, and the templates of the generated parts, whose data the
@@ -54,6 +56,7 @@ let parts: Readonly<Record<PartKey, BuiltInPart>> | undefined
  */
 export const builtInParts = (): Readonly<Record<PartKey, BuiltInPart>> => parts ??= {
   'runtime/shared': { roles: BOTH, text: sharedPrompt }, 'runtime/orchestrator': { roles: MAIN, text: masterPrompt },
+  'runtime/reviewer': { roles: ['reviewer'], text: reviewerPrompt },
   'runtime/worker': { roles: WORKER, text: workerPrompt },
   'runtime/subscriptions': { roles: BOTH, text: `## subscriptions\n${guides.subscriptions}` },
   'runtime/replies': { roles: BOTH, text: `## replies\n${guides.replies}` },
@@ -67,6 +70,7 @@ export const builtInParts = (): Readonly<Record<PartKey, BuiltInPart>> => parts 
     placeholders: ['{version}', '{mode}'] },
   'skill/feishu': { roles: BOTH, text: `${sourceSkills.feishu}\n\n## CLI usage\n${cliNotes}` },
   'skill/github': { roles: BOTH, text: `${sourceSkills.github}\n\n## CLI usage\n${cliNotes}` },
+  'skill/dingtalk': { roles: BOTH, text: `${sourceSkills.dingtalk}\n\n## CLI usage\n${cliNotes}` },
 }
 /** The key of a built-in text, which an override's `base` records. */
 export const builtInBase = (text: string): string => key('prompt-built-in', text)
@@ -104,21 +108,28 @@ export function promptParts(config: PromptConfig, role: Role, environment?: stri
   const fixed = (name: string, part = name) => ({ name, kind: 'fixed' as const, key: part, text: builtIn(config, part as PartKey) })
   const team = (name: TeamSection) => ({ name, kind: 'team' as const, heading: `## ${TEAM_HEADINGS[name]}`,
     text: config[name] ? `## ${TEAM_HEADINGS[name]}\n${config[name]}` : '' })
-  return [
-    fixed('runtime/shared'), fixed(`runtime/${role}`),
-    ...TEAM_SECTIONS.map(team),
-    ...['subscriptions', 'replies', role === 'orchestrator' ? 'dispatch' : 'work'].map(name => fixed(`runtime/${name}`)),
-    ...role === 'orchestrator' ? [fixed('runtime/admission')] : [],
-    fixed('runtime/handoff', `runtime/handoff/${role}`),
-    ...environment ? [{ name: 'runtime/environment', kind: 'generated' as const, key: 'runtime/environment', text: environment }] : [],
-    ...role === 'orchestrator' && policy ? [{ name: 'runtime/policy', kind: 'generated' as const, ...policy }] : [],
-  ].filter(part => part.text)
+  // The reviewer judges a result in its own Session, with nothing to dispatch, deliver or hand off, so only its own role's text
+  // and the environment around shared apply to it.
+  const parts = role === 'reviewer'
+    ? [fixed('runtime/shared'), fixed('runtime/reviewer'),
+      ...environment ? [{ name: 'runtime/environment', kind: 'generated' as const, key: 'runtime/environment', text: environment }] : []]
+    : [fixed('runtime/shared'), fixed(`runtime/${role}`),
+      // Team sections describe work a Session does itself. The main Session routes rather than builds and delivers, so the PR
+      // delivery requirements and the scope rules for its own edits belong to the worker; both still speak to people, so
+      // Communication stays.
+      ...TEAM_SECTIONS.filter(name => role === 'worker' || name === 'communication').map(team),
+      ...['subscriptions', 'replies', role === 'orchestrator' ? 'dispatch' : 'work'].map(name => fixed(`runtime/${name}`)),
+      ...role === 'orchestrator' ? [fixed('runtime/admission')] : [],
+      fixed('runtime/handoff', `runtime/handoff/${role}`),
+      ...environment ? [{ name: 'runtime/environment', kind: 'generated' as const, key: 'runtime/environment', text: environment }] : [],
+      ...role === 'orchestrator' && policy ? [{ name: 'runtime/policy', kind: 'generated' as const, ...policy }] : []]
+  return parts.filter(part => part.text)
 }
 export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }): string {
   return promptParts(config, role, environment, policy).map(part => part.text).join('\n\n')
 }
 export function composeSkill(config: PromptConfig, name: string): string {
-  return name === 'feishu' || name === 'github' ? builtIn(config, `skill/${name}`) : config.skills[name] ?? ''
+  return name in sourceSkills ? builtIn(config, `skill/${name}` as PartKey) : config.skills[name] ?? ''
 }
 
 /** An override whose built-in text changed since its `base`, with that text when kept, or whose part this version no longer has. */
@@ -135,16 +146,22 @@ export class PromptConflict extends Error {}
 export class Prompts {
   private readonly versions: Versions<PromptVersion>
   constructor(private readonly store: Store, private readonly maxChars: () => number, private readonly environment: () => Variable[] | undefined,
-    private readonly feishu: () => boolean) {
+    private readonly feishu: () => boolean, private readonly github: () => boolean) {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
   compose(config: PromptConfig, role: Role, variables = this.environment()): string {
     return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
   }
-  /** Returns skills to register in every Session: built-in Source skills (`feishu` only when a Feishu bot is configured) followed by team skills. */
+  /**
+   * Whether the DingTalk Source's skill applies: its instance is on in the settings, which is what decides for a Source
+   * whose account needs no probe beyond the settings themselves.
+   */
+  private dingtalk(): boolean { return this.store.settings().sources.dingtalk?.enabled ?? false }
+  /** Returns skills to register in every Session: built-in Source skills (`feishu` and `github` only when that Source's account is configured, `dingtalk` when its instance is on) followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
-    return [...this.feishu() ? ['feishu'] : [], 'github', ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
+    return [...this.feishu() ? ['feishu'] : [], ...this.github() ? ['github'] : [], ...this.dingtalk() ? ['dingtalk'] : [],
+      ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
   }
   current(): PromptVersion {
     const revision = this.versions.revision()

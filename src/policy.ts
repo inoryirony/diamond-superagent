@@ -92,8 +92,31 @@ export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
+  /**
+   * The workspace the main Session works in: the directory holding the repositories an answer may need to read. Empty keeps the
+   * state directory, which holds no repository, so an answer that must locate a named tool or service in code cannot find it.
+   */
+  workspace: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
+  /**
+   * Path to the local file holding the internal Grafana `user=` / `password=` pair that the production log lookup reads. Empty
+   * falls back to `$GRAFANA_ENV_FILE`, then `$DSH_SUPERAGENT_GRAFANA_ENV`, then a path under the operator's home. Settings hold
+   * the path, never the credential, and each operator names their own file instead of inheriting one machine's path.
+   */
+  grafanaEnvFile: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for the default').default(''),
+  /**
+   * The phases between a worker's result and its person, in order, each switchable; the Defaults of `docs/003` describe them.
+   * `review`: a Reviewer Session judges the result before the ticket delivers it, and returns it to the worker with findings
+   * it fails. `deploy`: the review deploys the branch to a test environment and runs its end-to-end checks before passing the
+   * result. A phase that cannot run waits for a person rather than passing unchecked.
+   */
+  reviews: z.boolean().default(true),
+  deploy: z.boolean().default(false),
+  /** Run for a review that deploys the branch, in the ticket directory, with the ticket's execution environment: 0 fails it. */
+  deployCommand: z.string().max(LIMITS.deployCommand).default(''),
+  /** Run after `deployCommand` succeeded, with the ticket's execution environment: 0 passes the end-to-end checks. */
+  e2eCommand: z.string().max(LIMITS.e2eCommand).default(''),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({
@@ -190,7 +213,12 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
     gate(trigger: Trigger, thread, tickets) {
       if (!trigger.human) return machineGate(trigger)
-      const allowed = allowedSender(settings, trigger.actor)
+      // The operator's own messages are admitted like a listed sender's: the Source marks them `meta.operator` because the
+      // account typed them itself, and requiring the operator's name on the member list made every message he wrote to a
+      // listed contact a `not_a_member` that the main Session then ignored.
+      const listed = allowedSender(settings, trigger.actor)
+      const operator = trigger.meta.operator === true
+      const allowed = listed ?? (operator ? { id: trigger.actor.id, ...(typeof trigger.meta.sender === 'string' ? { name: trigger.meta.sender } : {}) } : undefined)
       const scope = listened(sources, trigger.source, trigger.meta)
       const row = scope.listened ? scope.row : undefined
       const recorded = { source: trigger.source, scope: trigger.meta, ...row === undefined ? {} : { row }, ...allowed ? { sender: senderName(allowed) } : {} }

@@ -10,7 +10,7 @@ import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
-import { mandateInstructions } from '../src/executor/dsh.ts'
+import { mandateInstructions, reviewerSessionId } from '../src/executor/dsh.ts'
 import { masterPrompt } from '../src/app/context.ts'
 import { reference, testMachine } from './fixtures/deployment.ts'
 import type { Machine } from '../src/deployment.ts'
@@ -37,7 +37,7 @@ import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets
 
 let runtime: Runtime
 const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.sources, links: value.links() })
-const overviewOf = (value: Runtime) => overview(viewsOf(value), value.health, policyVersion(value.store.settings()), executorLoad(value.store, value.executor.activeCount()), value.setupProblem ?? value.feishuProblem)
+const overviewOf = (value: Runtime) => overview(viewsOf(value), value.health, policyVersion(value.store.settings()), executorLoad(value.store, value.executor.activeCount()), value.problems)
 let directory: string
 let controller: { create: ReturnType<typeof vi.fn>; selectModel: ReturnType<typeof vi.fn>; resolveAgent: ReturnType<typeof vi.fn>; rename: ReturnType<typeof vi.fn>; prompt: ReturnType<typeof vi.fn>; inspect: ReturnType<typeof vi.fn> }
 type RegisteredTool = { name: string; output: { render: (args: unknown, result: unknown) => unknown }; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
@@ -59,6 +59,14 @@ let agents: Map<string, { id: string; status: string; inbox: { nextTurn: UserMes
 const runTool = async (sessionId: string, name: string, args: unknown) => {
   const tool = tools.get(sessionId)?.get(name)
   if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
+  // A worker runs a check before it reports ready, as the host requires; DSH logs the call as it starts.
+  if (name === 'orchestrator_report' && (args as { state?: string }).state === 'ready') {
+    const session = (agents.get(sessionId) as unknown as { session?: { snapshotEvents(): unknown[] } } | undefined)?.session
+    session?.snapshotEvents().push({ type: 'tool/call', time: Date.now(), data: { name: 'bash' } })
+  }
+  // DSH logs every call as it starts, with the raw arguments the model produced.
+  const log = (agents.get(sessionId) as unknown as { session?: { snapshotEvents(): unknown[] } } | undefined)?.session?.snapshotEvents()
+  log?.push({ type: 'tool/call', time: Date.now(), data: { name, arguments: JSON.stringify(args) } })
   const output = await tool.execute(args, { signal: new AbortController().signal })
   expect(JSON.parse(JSON.stringify(output))).toStrictEqual(output)
   await runtime.idle()
@@ -114,21 +122,32 @@ let deliveries: ReturnType<typeof vi.fn<(request: { sessionId: string; mode: 'qu
 const relays = (sessionId: string) => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId === sessionId).map(call => {
   try { return JSON.parse(call.text) as Record<string, unknown> } catch { return { text: call.text } as Record<string, unknown> }
 })
+/** Candidate cards, oldest first, each delivered to its own Eval Session. */
+const cards = () => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId.startsWith('eval-')).map(call => {
+  try { return JSON.parse(call.text) as Record<string, unknown> } catch { return { text: call.text } as Record<string, unknown> }
+}).filter(item => item.kind === 'candidate')
+/** The Eval Session that last received the candidate card of `triggerId`, else the main Session, which routes explicit requests too. */
+const evalSession = (triggerId: string) => deliveries.mock.calls.map(([call]) => call)
+  .filter(call => call.sessionId.startsWith('eval-') && call.text.includes(`"trigger_id":"${triggerId}"`)).at(-1)?.sessionId ?? runtime.masterId
 const MEMBER = 'ou_alice'
 const CHAT = 'oc_team'
 function feishu(id: string, text: string, overrides: Record<string, unknown> = {}): Trigger {
   return feishuTrigger({ message_id: `om_${id}`, chat_id: CHAT, chat_type: 'group', sender_id: MEMBER, sender_type: 'user', content: text, create_time: String(Date.parse('2026-09-09T00:00:00Z') + Number(id.replace(/\D/g, '') || 0) * 1000), mentions: [{ id: 'ou_bot' }], ...overrides }, 'ou_bot', 'cli_bot')!
 }
 const worktreeName = 'fix-regression'
-/** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
+/** Route one decision with orchestrator_route in the Session that holds its candidate, answering its result; a refused one throws its reason. */
 async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
+  const sessionId = typeof item.trigger_id === 'string' ? evalSession(item.trigger_id) : runtime.masterId
+  // A model reads the conversation before it attaches or answers, as dispatch asks and the host enforces.
+  if (item.kind === 'attach' || item.kind === 'answer') await runTool(sessionId, 'orchestrator_read', { resource: `trigger/${String(item.trigger_id)}` }).catch(() => undefined)
+  const { results } = await runTool(sessionId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
   if (results[0]!.refused) throw new Error(String(results[0]!.refused))
   return results[0]!
 }
 async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归')) {
   await receive(trigger)
-  expect(relays(runtime.masterId).some(item => item.trigger_id === trigger.id)).toBe(true)
+  // A message a worker handed back waits for the next pass, up to 2 seconds away, to reach an Eval Session.
+  await vi.waitFor(() => expect(cards().some(item => item.trigger_id === trigger.id)).toBe(true), { timeout: 3000 })
   const result = await route({ kind: 'accept', trigger_id: trigger.id, title: '修复回归',
     worktree_name: worktreeName, acknowledgement: '收到，修复回归。' })
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
@@ -218,7 +237,7 @@ afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await 
 
 it('relays an explicit member mention as a candidate and creates the ticket, acknowledgement, subscription and worker on accept', async () => {
   const { trigger, ticket, sessionId } = await acceptedTicket()
-  const candidate = relays(runtime.masterId).find(item => item.kind === 'candidate')!
+  const candidate = cards().find(item => item.trigger_id === trigger.id)!
   expect(candidate).toMatchObject({ strength: 'explicit', trigger_id: trigger.id, next_action: 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.' })
   expect(ticket).toMatchObject({ title: '修复回归', mandate: { strength: 'explicit', basis: expect.objectContaining({ via: 'addressed', source: 'feishu', sender: 'Alice', addressed: 'mention', scope: expect.objectContaining({ chatId: CHAT }) }) },
     execution: expect.objectContaining({ name: expect.stringMatching(/^fix-regression-/) }), origin: expect.objectContaining({ triggerId: trigger.id }) })
@@ -267,7 +286,7 @@ it('assesses a proactive observation in the orchestrator Session and creates the
   await observe('observe')
   const trigger = feishu('3', '这个文案好奇怪，改成“浏览网页”吧', { mentions: [] })
   await receive(trigger)
-  const candidate = relays(runtime.masterId).at(-1)!
+  const candidate = cards().at(-1)!
   expect(candidate).toMatchObject({ kind: 'candidate', strength: 'inferred', mode: 'observe', next_action: expect.stringContaining('orchestrator_eval') })
   vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_3', chat_id: CHAT }] })
   const details = await runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: trigger.id })
@@ -369,9 +388,13 @@ it('shows a message that carries JSON, with or without a label, as its label and
   expect(readable('label: {not json}')).toBe('label: {not json}')
 })
 
-it('ends a ticket on ready when no PR is bound', async () => {
+it('ends a ticket on a ready result once its review passes it, when no PR is bound', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'done locally' })
+  // With reviews on, the result waits in a review of its own; the review's pass ends the ticket, as the report used to.
+  await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.reviews).toHaveLength(1))
+  const review = runtime.store.tickets.get(ticket.id)!.reviews![0]!
+  await runtime.reviewers.reviewed(reviewerSessionId(ticket.id, review.round), { outcome: 'passed', summary: 'Checked the diff.' })
   expect(runtime.store.tickets.get(ticket.id)).toMatchObject({ ended: expect.objectContaining({ outcome: 'completed' }) })
   await expect(runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'late' })).rejects.toThrow('Ticket ended')
 })
@@ -428,7 +451,7 @@ it('tells live workers about policy changes instead of revoking them and restart
   expect(runtime.store.tickets.get(ticket.id)!.ended).toBeUndefined()
   expect(relays(sessionId)).toEqual([{ text: expect.stringContaining('may no longer start work') }])
   expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_8`)[0]).toMatchObject({ kind: 'unavailable', reason: [{ code: 'policyChanged' }] })
-  expect(relays(runtime.masterId).filter(item => item.kind === 'candidate' && item.trigger_id === pending.id)).toHaveLength(1)
+  expect(cards().filter(item => item.trigger_id === pending.id)).toHaveLength(1)
 })
 
 it('attaches an event to an existing open task through orchestrator_route', async () => {
@@ -460,7 +483,7 @@ it('treats GitHub comments through the same gate: mentions by members are explic
   expect(runtime.store.decisions.byThread('github:7')).toEqual([expect.objectContaining({ kind: 'ignore', reason: [expect.objectContaining({ code: 'not_a_member' })] })])
   const mention = commentTrigger({ id: 2, body: '@agent-bot please fix', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/pull/7#issuecomment-2', created_at: '2026-09-09T00:01:00Z' }, { number: 7, isPr: true }, 'conversation', 'agent-bot')
   await receive(mention)
-  expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: mention.id })
+  expect(cards().at(-1)).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: mention.id })
   const result = await route({ kind: 'accept', trigger_id: mention.id, title: 'Fix PR 7', worktree_name: 'fix-pr', acknowledgement: 'On it: fixing the review finding.' })
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
   expect(ticket.channels).toEqual([expect.objectContaining({ source: 'github', address: expect.objectContaining({ number: '7' }) })])
@@ -482,7 +505,7 @@ it('relays an allowed sender\'s mention in a new Issue as an explicit candidate 
   runtime.store.set('github-since', '2026-09-08T23:59:00.000Z')
   await pollRound(runtime.context(githubKind))
   await runtime.idle()
-  const candidate = relays(runtime.masterId).at(-1)
+  const candidate = cards().at(-1)
   expect(candidate).toMatchObject({ kind: 'candidate', strength: 'explicit', trigger_id: key('github-issue', '12'), thread: 'github:12' })
 })
 
@@ -810,19 +833,20 @@ it('leaves waiting and blocked assignments alone after a restart and keeps block
   expect(runtime.store.tickets.get(other.ticket.id)!.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
 })
 
-it('waits for setup without the agent\'s GitHub CLI: the panel works, and nothing is polled, assessed or dispatched', async () => {
+it('waits for setup when git ignores the agent credential configuration: the panel works, and nothing is polled, assessed or dispatched', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'crashed' })
   expect(() => runtime.checkSetup()).toThrow('Setup is complete')
   controller.create.mockClear(); deliveries.mockClear()
-  const next = await restart({}, { github: { cli: '' } })
+  answers = { ...answers, [HELPERS]: 'file:/home/me/.gitconfig\0!gh auth git-credential\0' }
+  const next = await restart()
   await next.ready
   expect(next.configured()).toBe(false)
-  expect(next.setupProblem).toEqual({ place: 'github', code: 'agentCliUnset', values: {}, detail: 'The agent GitHub CLI is not set.' })
+  expect(next.problems).toEqual([{ place: 'deployment', code: 'gitTooOld', values: {}, detail: 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.' }])
   expect(next.health.runtime).toMatchObject({ state: 'paused', code: 'setupPending' })
-  expect(() => next.deployment).toThrow('dsh-superagent is waiting for setup: The agent GitHub CLI is not set.')
-  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problem: { place: 'github' }, accounts: null, machine: { stateDir: directory } } })
-  expect(overviewOf(next).problems[0]).toEqual({ kind: 'setup', ...next.setupProblem })
+  expect(() => next.deployment).toThrow('dsh-superagent is waiting for setup: git does not read the github.com credential configuration')
+  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problems: [{ place: 'deployment' }], accounts: null, machine: { stateDir: directory } } })
+  expect(overviewOf(next).problems[0]).toEqual({ kind: 'setup', ...next.problems[0] })
   await receive(feishu('30', '@bot 修一下'), next)
   // A retry waits for setup instead of launching a worker that cannot run, and no report reaches the orchestrator.
   await next.engine.retryTicket(ticket.id)
@@ -844,7 +868,7 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   const needs = async (place: string, code: string, values: Record<string, string>, accounts: Accounts = {}) => {
     const next = await restart({}, accounts)
     await next.ready
-    expect(next.setupProblem).toMatchObject({ place, code, values })
+    expect(next.problems[0]).toMatchObject({ place, code, values })
   }
   answers[`${AGENT()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":false}\n'
   await needs('github', 'repositoryReadOnly', { account: 'agent-bot', repository: 'acme/widgets' })
@@ -865,7 +889,16 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   await next.ready
   expect(next.configured()).toBe(true)
   expect(next.deployment.feishu).toBeUndefined()
-  expect(next.feishuProblem).toMatchObject({ place: 'feishu', code: 'feishuUserIdentity', values: { mode: 'off' } })
+  expect(next.problems[0]).toMatchObject({ place: 'feishu', code: 'feishuUserIdentity', values: { mode: 'off' } })
+})
+
+it('is configured with no problem when the GitHub Source names neither a repository nor a CLI', async () => {
+  const next = await restart({}, { github: { repository: '', cli: '' } })
+  await next.ready
+  expect(next.configured()).toBe(true)
+  expect(next.problems).toEqual([])
+  expect(next.deployment.github).toBeUndefined()
+  expect(next.health.runtime).toMatchObject({ state: 'ready' })
 })
 
 it('reports a failure to write the agent environment as environmentFailed and leaves this process\'s environment as it was', async () => {
@@ -876,7 +909,7 @@ it('reports a failure to write the agent environment as environmentFailed and le
   const environment = { ...process.env }
   const next = await restart()
   await next.ready
-  expect(next.setupProblem).toMatchObject({ place: 'deployment', code: 'environmentFailed',
+  expect(next.problems[0]).toMatchObject({ place: 'deployment', code: 'environmentFailed',
     values: { output: expect.stringContaining('EEXIST') } })
   expect(process.env).toEqual(environment)
 })
@@ -885,7 +918,7 @@ it('checks only the account a Source save changes, so a problem setup has elsewh
   answers = { ...answers, [`${BOT()} config strict-mode`]: 'strict-mode: off (source: profile)' }
   const next = await restart()
   await next.ready
-  expect(next.feishuProblem).toMatchObject({ code: 'feishuUserIdentity' })
+  expect(next.problems[0]).toMatchObject({ code: 'feishuUserIdentity' })
   next.sources.register(feishuKind); next.sources.register(githubKind)
   answers[`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":true}\n'
   const github = next.settings.block('source:github')
@@ -959,25 +992,25 @@ it('runs setup again while the Feishu bot check failed, and restores the process
   const next = await restart()
   await next.ready
   expect(next.configured()).toBe(true)
-  expect(next.feishuProblem?.code).toBe('feishuUserIdentity')
+  expect(next.problems[0]?.code).toBe('feishuUserIdentity')
   next.checkSetup()
   await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
   answers[HELPERS] = 'file:/home/me/.gitconfig\0!gh auth git-credential\0'
   const broken = await restart()
   await broken.ready
-  expect(broken.setupProblem).toMatchObject({ place: 'deployment', code: 'gitTooOld' })
+  expect(broken.problems).toContainEqual(expect.objectContaining({ place: 'deployment', code: 'gitTooOld' }))
   expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
   expect(process.env.PATH?.split(':')).not.toContain(join(directory, 'worker-bin'))
 })
 
 it('writes worker shims and the agent environment from the configuration only, and restores the environment on stop', async () => {
   const bin = join(directory, 'worker-bin')
-  expect(readdirSync(bin).sort()).toEqual(['gh', 'lark-cli'])
+  expect(readdirSync(bin).sort()).toEqual(['dws', 'gh', 'glab', 'lark-cli'])
   expect(readFileSync(join(bin, 'lark-cli'), 'utf8')).toContain(`exec '${BOT()}'`)
   runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, blockedCommands: ['personal-gh'] } })
   const next = await restart({}, { feishu: null })
   await next.ready
-  expect(readdirSync(bin).sort()).toEqual(['gh', 'lark-cli', 'personal-gh'])
+  expect(readdirSync(bin).sort()).toEqual(['dws', 'gh', 'glab', 'lark-cli', 'personal-gh'])
   expect(readFileSync(join(bin, 'personal-gh'), 'utf8')).toContain('personal-gh is blocked in this installation; use gh, which acts as agent-bot.')
   expect(readFileSync(join(bin, 'lark-cli'), 'utf8')).toContain('lark-cli is unavailable: this installation has no Feishu bot.')
   expect(readFileSync(join(bin, 'gh'), 'utf8')).toContain(`exec '${AGENT()}'`)
@@ -995,7 +1028,7 @@ it('waits for setup when the shim directory holds a file dsh-superagent did not 
   const next = await restart()
   await next.ready
   expect(next.configured()).toBe(false)
-  expect(next.setupProblem).toMatchObject({ place: 'deployment', code: 'foreignFile', values: { file: join(directory, 'worker-bin', 'my-script') } })
+  expect(next.problems[0]).toMatchObject({ place: 'deployment', code: 'foreignFile', values: { file: join(directory, 'worker-bin', 'my-script') } })
   expect(readFileSync(join(directory, 'worker-bin', 'my-script'), 'utf8')).toBe('#!/bin/sh\n')
   await next.stop()
 })
@@ -1004,9 +1037,9 @@ it('rewrites the blocked-command shims when the Executor settings change them, w
   const bin = join(directory, 'worker-bin')
   const save = (blockedCommands: string[]) => runtime.settings.save('executor', { ...runtime.store.settings().executor, blockedCommands }, runtime.store.blockRevision('executor'), 'panel')
   expect(await save(['personal-gh'])).toMatchObject({ saved: true, restarting: false })
-  expect(readdirSync(bin).sort()).toEqual(['gh', 'lark-cli', 'personal-gh'])
+  expect(readdirSync(bin).sort()).toEqual(['dws', 'gh', 'glab', 'lark-cli', 'personal-gh'])
   await save([])
-  expect(readdirSync(bin).sort()).toEqual(['gh', 'lark-cli'])
+  expect(readdirSync(bin).sort()).toEqual(['dws', 'gh', 'glab', 'lark-cli'])
   // The commands workers need cannot be blocked.
   await expect(save(['gh'])).rejects.toThrow()
   expect(restarts).not.toHaveBeenCalled()
@@ -1053,14 +1086,15 @@ it('lets a worker read the prompt version it works under and the ones it worked 
 })
 
 it('passes team text with template braces to every Session literally, without reading them as prompt variables', async () => {
-  const delivery = 'Pin the build to ${{ github.sha }}; keep {{x}} as written.'
+  // Communication is the team section every role reads; the Delivery section reaches workers only.
+  const communication = 'Pin the build to ${{ github.sha }}; keep {{x}} as written.'
   const current = runtime.prompts.current()
-  runtime.prompts.save({ ...current.config, delivery }, current.revision, 'panel')
+  runtime.prompts.save({ ...current.config, communication }, current.revision, 'panel')
   const { sessionId } = await acceptedTicket()
   for (const id of [runtime.masterId, sessionId]) {
     const section = sections.get(id)!
     const text = renderPrompt({ sections: [{ name: section.name, text: section.text({}), interpolate: section.interpolate }], contexts: [], tools: [], variables: {} })
-    expect(text).toContain(delivery)
+    expect(text).toContain(communication)
   }
 })
 
@@ -1071,7 +1105,9 @@ it('leaves auto-merge to the delivery requirements, with the agent\'s own gh and
   const delivery = runtime.prompts.current().config.delivery
   expect(delivery).toContain('it changes fewer than 200 lines (additions plus deletions);')
   // Auto-merge is never enabled as the agent account; only a merge CLI the section names enables it.
-  expect(delivery).toContain('Never enable auto-merge as the agent account')
+  expect(delivery).toContain('never enable auto-merge as the agent account')
+  // A GitLab project delivers through dev and the dev-to-test promotion instead of the pull-request flow.
+  expect(delivery).toContain('you merge the merge request into `dev` once its checks pass')
   expect(delivery).toContain('<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha>')
   expect(runtime.prompts.preview(runtime.prompts.current().config).worker).not.toContain('gh-merge')
 })
@@ -1432,8 +1468,12 @@ it('tells the conversation that the PR merged when work a restart recovered ends
   expect(runtime.store.tickets.get(ticket.id)).not.toHaveProperty('ended')
   const id = key('pr-terminal', '42', 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged')
   expect(runtime.store.replyStatus(id)).toBeUndefined()
-  // Its ready report ends the ticket with the PR, and the conversation hears of the merge once.
+  // Its ready report goes to a review of its own, and that review's pass ends the ticket with the PR, so the conversation
+  // hears of the merge once.
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Recovered and verified' })
+  await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.reviews).toHaveLength(1))
+  const round = runtime.store.tickets.get(ticket.id)!.reviews![0]!.round
+  await runtime.reviewers.reviewed(reviewerSessionId(ticket.id, round), { outcome: 'passed', summary: 'Checked the recovery.' })
   expect(runtime.store.tickets.get(ticket.id)!.ended).toMatchObject({ outcome: 'merged' })
   expect(runtime.store.replyStatus(id)).toBeDefined()
   // The report that ended the ticket was the worker's own: its turn is not cancelled inside that tool call.
@@ -1560,7 +1600,8 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   expect(guards.get(sessionId)!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get(sessionId)!()).toBe('Ticket ended; new work needs a new authorized ticket')
-  expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }])
+  // Every role has the same tools: the main Session's list is the worker's, not a narrower one.
+  expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
   // A worker keeps only the profile's work tools: none that ask a person, change the profile, schedule or start work outside
   // the worker slots, reach other Sessions or edit documents, whenever they were registered.
   expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])

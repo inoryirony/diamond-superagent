@@ -47,15 +47,25 @@ export const GithubAccountsSchema = z.object({
   cli: z.string().trim().default(''),
 })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
+/** The operator's DingTalk account: the `dws` CLI and the operator's own open DingTalk ID, which no API returns and so is entered by hand. */
+export const DingtalkAccountSchema = z.object({ cli: z.string().trim().default(''), openDingtalkId: z.string().trim().default('') })
+/** The Jira Server account: its base URL and the name of the environment variable that holds a Personal Access Token; the token itself is never stored. */
+export const JiraAccountSchema = z.object({ baseUrl: z.string().trim().regex(/^(https?:[/][/][^ ]+)?$/, 'http(s) URL').default(''), patEnv: z.string().trim().regex(/^([A-Za-z_][A-Za-z0-9_]*)?$/, 'environment variable name').default('') })
+/** The operator's GitLab account: the `glab` CLI and the group whose merge requests the Source follows. */
+export const GitlabAccountSchema = z.object({ cli: z.string().trim().default(''), group: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape), dingtalk: Object.keys(DingtalkAccountSchema.shape),
+  jira: Object.keys(JiraAccountSchema.shape), gitlab: Object.keys(GitlabAccountSchema.shape) }
 
-export interface Deployment extends Machine {
-  repository: string
-  github: { cli: string; login: string; noreply: string }
-  feishu?: FeishuBot
-}
+export interface GithubAccount { cli: string; login: string; noreply: string; repository: string }
+export interface Deployment extends Machine { github?: GithubAccount; feishu?: FeishuBot; dingtalk?: DingtalkAccount; jira?: JiraAccount; gitlab?: GitlabAccount }
+/** The Jira account a Personal Access Token (read from the environment variable `patEnv`, never stored) acts as. */
+export interface JiraAccount { baseUrl: string; patEnv: string; name: string; displayName: string }
+/** The signed-in GitLab account `glab` acts as, the instance it is signed in to, and the group whose merge requests the Source follows. */
+export interface GitlabAccount { cli: string; host: string; group: string; username: string }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+/** The signed-in DingTalk account `dws` acts as; `openDingtalkId` is the operator-entered ID that tells the account's own messages apart. */
+export interface DingtalkAccount { cli: string; openDingtalkId: string; userId: string; name: string; corpId: string }
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -83,11 +93,12 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+/** Verify the agent's GitHub CLI identity and push access to the configured repository; with both fields empty the Source is not configured, which is not a problem. */
+export async function resolveGithub(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GithubAccount | undefined> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
+  if (!remote && !accounts.cli) return undefined
   if (!remote) throw new SetupError('repositoryUnset')
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string
@@ -102,7 +113,7 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  return { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com`, repository }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })
@@ -128,4 +139,75 @@ export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe:
   const info = parsed(BotInfo, (await run('api', 'GET', '/open-apis/bot/v3/info', '--as', 'bot', '--format', 'ndjson')).split('\n')[0] ?? '')
   if (!info) return fail(new SetupError('feishuNoBot'))
   return { cli, appId: status.appId, brand: status.brand, botId: info.bot.open_id, name: info.bot.app_name }
+}
+
+const DingtalkAuth = z.object({ authenticated: z.boolean() })
+const DingtalkSelf = z.object({ result: z.array(z.object({ orgEmployeeModel: z.object({ userId: z.string().min(1), corpId: z.string().default(''), orgUserName: z.string().default('') }) })).min(1) })
+/**
+ * Verify the operator's DingTalk CLI is signed in and read the account it acts as; with both fields empty the Source is not configured, which is not a problem.
+ * The open DingTalk ID is entered by hand because no API returns it.
+ */
+export async function resolveDingtalk(machine: Machine, dingtalk: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<DingtalkAccount | undefined> {
+  const account = DingtalkAccountSchema.parse(dingtalk ?? {})
+  if (!account.cli && !account.openDingtalkId) return undefined
+  if (!account.cli) throw new SetupError('dingtalkCliUnset')
+  if (!account.openDingtalkId) throw new SetupError('dingtalkSelfUnset')
+  let cli: string
+  try { cli = executable(account.cli, path, workerBin(machine.stateDir)) } catch (error) { throw new SetupError('dingtalkCliMissing', { output: reason(error) }) }
+  const run = (...args: string[]): Promise<string> => probe([cli, ...args]).catch((error: unknown) => { throw new SetupError('dingtalkSignedOut', { output: reason(error) }) })
+  // `dws` may print a warning line before its JSON.
+  const json = (text: string): string => text.slice(text.indexOf('{'))
+  if (!parsed(DingtalkAuth, json(await run('auth', 'status')))?.authenticated) throw new SetupError('dingtalkSignedOut')
+  const me = parsed(DingtalkSelf, json(await run('contact', 'user', 'me', '--format', 'json')))?.result[0]?.orgEmployeeModel
+  if (!me) throw new SetupError('dingtalkSignedOut')
+  return { cli, openDingtalkId: account.openDingtalkId, userId: me.userId, name: me.orgUserName, corpId: me.corpId }
+}
+
+const JiraSelf = z.looseObject({ name: z.string().min(1), displayName: z.string().default('') })
+/** Reads a Jira URL with a Bearer token and returns its body; a status outside 2xx throws. */
+export type JiraProbe = (url: string, token: string) => Promise<string>
+/**
+ * The `Authorization` header for a Jira token. A Personal Access Token goes as a Bearer token; a value written as
+ * `user:password` (Jira Server's basic authentication, which some installations still use) goes as Basic.
+ */
+export const jiraAuthorization = (token: string): string =>
+  token.includes(':') ? `Basic ${Buffer.from(token).toString('base64')}` : `Bearer ${token}`
+export const jiraProbe: JiraProbe = async (url, token) => {
+  const response = await fetch(url, { headers: { Authorization: jiraAuthorization(token), Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) })
+  if (!response.ok) throw new Error(`Jira answered HTTP ${response.status}`)
+  return response.text()
+}
+/**
+ * Verify the Jira Personal Access Token named by `patEnv` against `/rest/api/2/myself` and read the account it acts as; with both fields empty
+ * the Source is not configured, which is not a problem. The token is read from `env` only here and is never stored.
+ */
+export async function resolveJira(_machine: Machine, jira: unknown, probe: JiraProbe = jiraProbe, env: Record<string, string | undefined> = process.env): Promise<JiraAccount | undefined> {
+  const account = JiraAccountSchema.parse(jira ?? {})
+  if (!account.baseUrl && !account.patEnv) return undefined
+  if (!account.baseUrl) throw new SetupError('jiraBaseUrlUnset')
+  if (!account.patEnv) throw new SetupError('jiraPatUnset')
+  const token = env[account.patEnv]
+  if (!token) throw new SetupError('jiraPatMissing', { name: account.patEnv })
+  const baseUrl = account.baseUrl.replace(/[/]+$/, '')
+  const text = await probe(`${baseUrl}/rest/api/2/myself`, token).catch((error: unknown) => { throw new SetupError('jiraSignedOut', { output: reason(error) }) })
+  const me = parsed(JiraSelf, text)
+  if (!me) throw new SetupError('jiraSignedOut')
+  return { baseUrl, patEnv: account.patEnv, name: me.name, displayName: me.displayName }
+}
+
+const GitlabUser = z.looseObject({ username: z.string().min(1) })
+/** Verify the operator's `glab` is signed in and read the account it acts as; with both fields empty the Source is not configured, which is not a problem. */
+export async function resolveGitlab(machine: Machine, gitlab: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GitlabAccount | undefined> {
+  const account = GitlabAccountSchema.parse(gitlab ?? {})
+  if (!account.cli && !account.group) return undefined
+  if (!account.cli) throw new SetupError('gitlabCliUnset')
+  if (!account.group) throw new SetupError('gitlabGroupUnset')
+  let cli: string
+  try { cli = executable(account.cli, path, workerBin(machine.stateDir)) } catch (error) { throw new SetupError('gitlabCliMissing', { output: reason(error) }) }
+  const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('gitlabSignedOut', { output: reason(error) }) })
+  const me = parsed(GitlabUser, text)
+  if (!me) throw new SetupError('gitlabSignedOut')
+  const host = (await probe([cli, 'config', 'get', 'host']).catch(() => '')).trim()
+  if (!host) throw new SetupError('gitlabSignedOut')
+  return { cli, host, group: account.group.replace(/^[/]+|[/]+$/g, ''), username: me.username }
 }

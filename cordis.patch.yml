@@ -10,6 +10,15 @@
     - id: dsh-superagent-feishu
       name: dsh-superagent/feishu-watch
       disabled: true
+    # The DingTalk Source, listening as the operator's own account; it stays paused until the DingTalk account is set up.
+    - id: dsh-superagent-dingtalk
+      name: dsh-superagent/dingtalk-watch
+    # Optional Jira Source; requires a Personal Access Token in an environment variable and the base URL after enabling.
+    - id: dsh-superagent-jira
+      name: dsh-superagent/jira-watch
+    # Optional GitLab Source; follows the agent's merge requests only, so it needs no Policy and sends nothing.
+    - id: dsh-superagent-gitlab
+      name: dsh-superagent/gitlab-watch
     # The agent preset of every Executor Session (WORKER_PRESET in src/app/sessions.ts); the main Session has its own, below.
     # It is DSH's `standard` preset with only what a worker needs, and a shell whose foreground command moves to a background job
     # after 5 seconds, so a long command does not hold back a person's message, which the Session takes at its next step. Left
@@ -66,6 +75,19 @@
             name: '@deepseek-ai/dsh-tool-fs-search'
             config:
               sampleOverCapGlobResults: false
+          # The team's shared agent memory (engram). Same server and header for every profile, so a Session reads and writes the
+          # same memory whoever runs it; it registers mcp__engram__prime / search / follow / by_scope / by_author / status /
+          # remember. A dead endpoint only logs, so no Session fails to start because memory is unreachable.
+          - id: mcp-engram
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: streamable-http
+              serverName: engram
+              url: http://10.1.9.181:8701/mcp
+              headers:
+                X-Engram-User: tianzema
+              toolCallTimeoutMs: 60000
+              failOnStartupError: false
           # A wait for a job ends after 5 s too; the job's end wakes the worker with its result.
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
@@ -118,16 +140,132 @@
             config:
               fetch: false
               searchTimeoutMs: 60000
-    # The agent preset of the main Session (ROUTER_PRESET in src/app/sessions.ts). The worker's 5-second shell and job waits, so a command or a wait does not hold back the next candidates, and
-    # only what the main Session uses: no subagents, web, file search or writes, todo list, questions to a person, presenting,
-    # plan mode, plugin manager, scheduling, goals or workflows. No persona: the main Session's prompt is complete, so it has
-    # no other section.
+    # The agent preset of a Reviewer Session (REVIEWER_PRESET in src/app/sessions.ts). The same full tool surface as the worker:
+    # a review that writes or edits the code it judged has its verdict voided afterwards (see `audited` in session-actions), so
+    # the tool stays and the consequence polices it. Its shell uses the worker's 5-second foreground limit so a failing check
+    # surfaces as a background job instead of holding the turn.
+    - id: dsh-superagent-reviewer-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: dsh-superagent-reviewer
+        name: dsh-superagent 复核者
+        description: dsh-superagent 的复核 Session 专用，不供手动选择。与执行 Session 同一全套工具，改动所评代码会使裁定作废；前台命令超 5 秒转入后台。
+        order: 92
+        plugins:
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: shell
+            name: cordis:group
+            group: true
+            isolate:
+              shell: true
+            config:
+              - id: bash-sandbox
+                name: '@deepseek-ai/dsh-bash-sandbox'
+                disabled: !!js process.platform === 'win32'
+                config:
+                  timeoutMs: 5000
+                  maxTimeoutMs: 5000
+              - id: pwsh-sandbox
+                name: '@deepseek-ai/dsh-pwsh-sandbox'
+                disabled: !!js process.platform !== 'win32'
+                config:
+                  timeoutMs: 5000
+                  maxTimeoutMs: 5000
+              - id: tool-bash
+                name: '@deepseek-ai/dsh-tool-bash'
+                disabled: !!js process.platform === 'win32'
+              - id: tool-pwsh
+                name: '@deepseek-ai/dsh-tool-pwsh'
+                disabled: !!js process.platform !== 'win32'
+          # The verdict is the Reviewer's whole output: a write or edit it makes voids the verdict afterwards (`audited`), so the tool is not disabled here.
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              # Required by the package: without it the whole Reviewer Session fails to start, which made every review
+              # report "could not start" instead of judging the result.
+              sampleOverCapGlobResults: false
+          # The team's shared agent memory (engram). Same server and header for every profile, so a Session reads and writes the
+          # same memory whoever runs it; it registers mcp__engram__prime / search / follow / by_scope / by_author / status /
+          # remember. A dead endpoint only logs, so no Session fails to start because memory is unreachable.
+          - id: mcp-engram
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: streamable-http
+              serverName: engram
+              url: http://10.1.9.181:8701/mcp
+              headers:
+                X-Engram-User: tianzema
+              toolCallTimeoutMs: 60000
+              failOnStartupError: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+            config:
+              timeoutMs: 600000
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: compaction
+            name: cordis:group
+            group: true
+            # The pruner and compaction are services a preset must isolate; without this the whole Reviewer Session fails
+            # to start with "Preset services require isolate realms: toolResultPruner".
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelection: true
+                  modelDiscovery: true
+                  agentPreset: standard
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000
+    # The agent preset of the main Session (ROUTER_PRESET in src/app/sessions.ts). The worker's 5-second shell and job waits, so a
+    # command or a wait does not hold back the next candidates. The same full tool surface as the worker: the main Session is an
+    # ordinary agent with every tool — it reads and searches code and checks facts itself, and a write it makes is its own choice
+    # to answer for. No persona: the main Session's prompt is complete, so it has no other section.
     - id: dsh-superagent-router-preset
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: dsh-superagent-router
         name: dsh-superagent 主 Session
-        description: dsh-superagent 的主 Session 专用，不供手动选择。前台命令和任务等待超 5 秒转入后台，只含路由所需的工具。
+        description: dsh-superagent 的主 Session 专用，不供手动选择。前台命令和任务等待超 5 秒转入后台，与执行 Session 同一全套工具。
         order: 91
         plugins:
           - id: agent-instructions
@@ -162,9 +300,23 @@
                 disabled: !!js process.platform !== 'win32'
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
             config:
-              write: false
-              edit: false
+              sampleOverCapGlobResults: false
+          # The team's shared agent memory (engram). Same server and header for every profile, so a Session reads and writes the
+          # same memory whoever runs it; it registers mcp__engram__prime / search / follow / by_scope / by_author / status /
+          # remember. A dead endpoint only logs, so no Session fails to start because memory is unreachable.
+          - id: mcp-engram
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: streamable-http
+              serverName: engram
+              url: http://10.1.9.181:8701/mcp
+              headers:
+                X-Engram-User: tianzema
+              toolCallTimeoutMs: 60000
+              failOnStartupError: false
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
             config:
@@ -191,3 +343,28 @@
                   thresholdChars: 8192
                   headChars: 4096
                   tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelection: true
+                  modelDiscovery: true
+                  agentPreset: standard
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000

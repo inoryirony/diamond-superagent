@@ -64,6 +64,38 @@ export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket |
     return receiptNotice({ thread_unrelated: { ticket_id: ticketId, thread, reason }, at, note },
       `Ticket ${ticketId} no longer follows thread ${thread}: ${reason}`)
   }
+  // A ready result that ended the ticket after the rounds were spent: nothing is left to restart, so say what happened instead.
+  if (event.type === 'ticket.reviewRoundsSpent' && ticket(event.data.ticketId)?.unreviewed) {
+    const { ticketId, round } = event.data
+    return receiptNotice({ ticket_unreviewed: { ticket_id: ticketId, round, read: `ticket/${ticketId}` }, at,
+      note: 'The review rounds were spent, so this result went out without a review judging it; the ticket is marked unreviewed.' },
+      `Ticket ${ticketId}: its result went out unreviewed once the review rounds were spent`)
+  }
+  if (event.type === 'ticket.reviewRoundsSpent') {
+    const { ticketId, round, findings } = event.data
+    // The orchestrator learns both that the work stalled and what the reviewer kept finding, so it can decide with evidence
+    // instead of restating the person's request: restart the worker with a narrower instruction, or hand the ticket over.
+    return receiptNotice({ ticket_review_rounds_spent: { ticket_id: ticketId, round, findings, read: `ticket/${ticketId}` }, at,
+      note: 'Every review round returned this result, so nothing runs on its own. Act on the findings with orchestrator_ticket_restart, '
+        + 'or leave the ticket to a person; orchestrator_read shows the review summaries and the worker transcript.' },
+      `Ticket ${ticketId}: review round ${round} returned the result again, so its rounds are spent`)
+  }
+  if (event.type === 'ticket.stalled') {
+    const { ticketId, assignmentId, idleForMs } = event.data
+    const minutes = Math.round(idleForMs / 60_000)
+    return receiptNotice({ ticket_stalled: { ticket_id: ticketId, assignment_id: assignmentId, idle_minutes: minutes, read: `ticket/${ticketId}` }, at,
+      note: 'Its worker said nothing for this long and was already asked for its status once. Ask again with orchestrator_ticket_request_status, '
+        + 'or start it afresh with orchestrator_ticket_restart; orchestrator_read shows its transcript.' },
+      `Ticket ${ticketId} has been silent for ${minutes} minutes`)
+  }
+  if (event.type === 'ticket.holdDue') {
+    const { ticketId, question } = event.data
+    return receiptNotice({ ticket_hold_due: { ticket_id: ticketId, question, read: `ticket/${ticketId}` }, at,
+      note: 'A conflict on this ticket was due to be settled and nobody has. Ask the people involved again in each conversation it '
+        + 'came from, or escalate it to the operator; settle it with orchestrator_ticket_release once someone answers. The inputs the '
+        + 'hold locks stay parked until then; the rest of the ticket keeps working.' },
+      `Ticket ${ticketId} is still held on a conflict that is due`)
+  }
   return undefined
 }
 

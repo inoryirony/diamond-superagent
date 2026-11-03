@@ -2,8 +2,9 @@
 import { useRef, useState } from 'react'
 import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
 import { LIMITS } from '../limits.ts'
+import { blockingProblem } from '../setup.ts'
 import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
-import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
+import { DisclosureRow, Icon, InfoTip, Input, Pill, Switch } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { usePanel } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
@@ -20,7 +21,8 @@ export function ExecutionStatus({ filter: current, state, reload }: {
   const { paused, load: { maxWorkers } } = state
   // Pausing uses its own block revision so toggling pause does not invalidate an open Execution settings draft.
   const pause = async () => { await call('POST executor/pause', { body: { paused: !paused } }); await reload() }
-  const status = state.setup.problem ? { tone: 'warning', label: t('executorWaitingSetup') } : paused ? { tone: 'warning',
+  const blocked = blockingProblem(state.setup.problems)
+  const status = blocked ? { tone: 'warning', label: t('executorWaitingSetup') } : paused ? { tone: 'warning',
     label: t('processingPaused') }
     : { tone: 'ongoing', label: t('executorRunning') }
   const action = paused ? 'resumeProcessing' : 'pauseProcessing'
@@ -28,7 +30,7 @@ export function ExecutionStatus({ filter: current, state, reload }: {
     <StatusHead hint={t('executionStatusIntro')} settings="execution" />
     <div className="dt-row-meta dt-status-line">
       <span className="dt-status-text" data-state={status.tone}>{status.label}</span>
-      {!state.setup.problem && <>
+      {!blocked && <>
         <LabelValue label={t('executingLabel')}
           value={`${state.load.running} / ${maxWorkers}`} /><LabelValue label={t('queuedLabel')} value={state.load.queued} />
       </>}
@@ -102,16 +104,44 @@ export function ExecutionSettings() {
           </Field>
         </div>
         <div className="dt-form dt-block">
+          <h2 className="dt-block-title">{t('pipelineStages')}<InfoTip text={t('pipelineIntro')} /></h2>
+          <Field label={t('phaseReview')} hint={t('phaseReviewHint')}>
+            <Switch checked={value.reviews} onChange={reviews => edit({ reviews })} label={t('phaseReview')} />
+          </Field>
+          <Field label={t('phaseDeploy')} hint={t('phaseDeployHint')}>
+            <Switch checked={value.deploy} onChange={deploy => edit({ deploy })} label={t('phaseDeploy')} />
+          </Field>
+          <Field label={t('deployCommand')} hint={t('deployCommandHint')}>
+            <textarea className="dt-textarea dt-mono" rows={2} maxLength={LIMITS.deployCommand} spellCheck={false}
+              placeholder={t('deployCommandEmpty')} value={value.deployCommand}
+              onChange={event => edit({ deployCommand: event.target.value })} />
+          </Field>
+          <Field label={t('e2eCommand')} hint={t('e2eCommandHint')}>
+            <textarea className="dt-textarea dt-mono" rows={2} maxLength={LIMITS.e2eCommand} spellCheck={false}
+              placeholder={t('deployCommandEmpty')} value={value.e2eCommand}
+              onChange={event => edit({ e2eCommand: event.target.value })} />
+          </Field>
+        </div>
+        <div className="dt-form dt-block">
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
           <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
             : t('executionDirectoryDefault', { root: environment.root })}>
             <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false} pattern="/.*"
               onChange={event => edit({ directory: event.target.value })} />
           </Field>
+          <Field label={t('executionWorkspace')} hint={t('executionWorkspaceHint')} note={value.workspace ? undefined
+            : t('executionWorkspaceDefault', { root: environment.root })}>
+            <Input className="dt-mono" value={value.workspace} placeholder={t('executionWorkspaceEmpty')} spellCheck={false} pattern="/.*"
+              onChange={event => edit({ workspace: event.target.value })} />
+          </Field>
           <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>
             <textarea ref={prepare} className="dt-textarea dt-mono" rows={3} maxLength={LIMITS.prepareCommand} spellCheck={false}
               placeholder={t('prepareCommandEmpty')} value={value.prepare}
               onChange={event => edit({ prepare: event.target.value })} />
+          </Field>
+          <Field label={t('grafanaEnvFile')} hint={t('grafanaEnvFileHint')}>
+            <Input className="dt-mono" value={value.grafanaEnvFile} placeholder={t('grafanaEnvFileEmpty')} spellCheck={false} pattern="/.*"
+              onChange={event => edit({ grafanaEnvFile: event.target.value })} />
           </Field>
           <EnvironmentVariables groups={environment.variables} sources={sources} onPick={insert} />
           <Field label={t('blockedCommands')} hint={t('blockedCommandsHint')}>

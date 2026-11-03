@@ -71,18 +71,6 @@ export class Evals extends EnginePart {
   start(threadKeyValue: string, policy: Policy): void {
     const thread = this.repo.threads.get(threadKeyValue)!
     const at = this.now()
-    // A person's follow-up a ticket still decides is that ticket's: one an older version queued leaves the queue without a Decision.
-    const delivered = (id: string) => {
-      const trigger = this.repo.triggers.get(id)
-      return !!trigger && this.owners(trigger).length > 0
-    }
-    if (thread.pending.some(delivered)) {
-      const followups = thread.pending.filter(delivered)
-      thread.pending = thread.pending.filter(id => !followups.includes(id))
-      this.repo.threads.save(thread)
-      for (const triggerId of followups) this.emit('trigger.followup', { triggerId })
-      if (!thread.pending.length) return
-    }
     // Triggers that already originated a ticket cannot lend authority to a new evaluation or spawn a duplicate ticket.
     const accepted = this.accepted(thread.key)
     const started = thread.pending.filter(id => accepted.has(id))
@@ -144,8 +132,9 @@ export class Evals extends EnginePart {
       }
       return earlier
     }
-    // A follow-up that reached a ticket is its worker's to judge: the main Session may only stop the work on it.
-    if (outcome.kind !== 'stop') this.leftToWorkers(trigger)
+    // A follow-up that reached a ticket may not start a second ticket over its worker's head: the worker decides it, and the
+    // main Session may still read it, ignore it, stop the ticket or attach the message to another ticket.
+    if (outcome.kind === 'accept') this.leftToWorkers(trigger)
     const thread = held ?? this.thread(trigger.threads[0]!)
     const evaluation = held?.evaluating ?? this.directEval(thread, trigger, outcome.kind, outcome.kind === 'stop' ? outcome.ticketId : undefined)
     // An inferred candidate is accepted only on enabled rules its assessment matched, while assessments may accept.
@@ -238,7 +227,11 @@ export class Evals extends EnginePart {
     const evaluation = thread.evaluating!
     const triggers = evaluation.triggerIds.flatMap(id => { const trigger = this.repo.triggers.get(id); return trigger ? [trigger] : [] })
     const { id: evalId, strength, policyVersion } = evaluation
-    return { evalId, thread, triggers, strength, policyVersion, tickets: this.ticketsOnThread(thread) }
+    // Every live ticket, wherever its thread, so the assessor sees duplicates and related work; ended ones only from this thread.
+    const onThread = this.ticketsOnThread(thread)
+    const seen = new Set(onThread.map(ticket => ticket.id))
+    const tickets = [...onThread, ...this.repo.tickets.open().filter(ticket => !seen.has(ticket.id))]
+    return { evalId, thread, triggers, strength, policyVersion, tickets, boardSeq: this.repo.tickets.boardSeq() }
   }
   /**
    * Record that the queued Triggers `ids` of a Thread start no Eval, for `reason`, and take them out of its queue. Its id

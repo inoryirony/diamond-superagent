@@ -69,7 +69,7 @@ Callers receive only their role's `Pick` of the Engine: `EngineForSources`, `Eng
 | Sources | `bindThread(ticketId, thread, own)` | Makes an open Ticket follow one of the Source's Threads, such as a pull request's, `own` when the Ticket opened it; a closed Thread bound again is open again. The Threads' closes, not a `ready` Report, end the Ticket |
 | Sources | `threadClosed(thread, outcome, at)` | A Thread closed: each open Ticket that follows it records the close, and ends once it is done with the Threads it follows (`followsDone`): no Thread it opened is open, or, when it opened none, every Thread it follows closed. It ends `merged` or `closed` as the latest of those closes did, unless work resumed after the close has not reported `ready`, or its Executor took up, by acknowledging or answering it, a person's follow-up it decides after its latest Report other than `progress`, or the end of its last turn; a `dropped` Report then ends it as the close did |
 | Main Session | `candidate(triggerId)` | The Eval that holds a Trigger, as its assessor sees it |
-| Main Session | `candidateDelivered(evalId)` | The Eval's candidate reached the main Session: its deadline counts from now |
+| Eval Session | `candidateDelivered(evalId)` | The Eval's candidate reached its Session: its deadline counts from now |
 | Main Session | `decide(triggerId, outcome)` | Records an Eval Decision, or a direct Decision for an explicit request. Accept creates the Ticket, Mandate, Assignment, Subscriptions and acknowledgement atomically. An inferred candidate ignored from its card records `ignoredFromCard` before the supplied reason. While `followupOwners` still owns a human follow-up, only stop is allowed |
 | Main Session | `attach(ticketId, triggerId, note?)` | Routes a Trigger to a Ticket it points at, whose Executor then decides it as a follow-up, and ends the Eval that holds it, whose other Triggers wait for a fresh Eval; an ended Ticket resumes under its Mandate at once unless processing is paused. A follow-up an Executor still decides is refused, as is one routed back to the Ticket that handed it back |
 | Main Session | `requestStatus(ticketId)` | Asks a waiting Executor Session for its status, and answers whether it asked |
@@ -90,13 +90,14 @@ Callers receive only their role's `Pick` of the Engine: `EngineForSources`, `Eng
 | Executor | `followForContext(ticketId, thread)` | Subscribes an open Ticket to a related Thread for context: its messages reach the Ticket but lend it no follow-up strength and do not resume it |
 | Executor | `handback(ticketId, triggerId, reason)` | Records that the Ticket hands back a Trigger that reached it, with the reason its candidate carries, and queues it for a fresh Eval once no other Ticket decides it, if this Ticket did; it answers whether it queued it. A Ticket hands back each Trigger once and keeps its Subscription |
 | Executor | `assignmentInterrupted(ticketId, assignmentId)` | An Assignment was running when the host stopped: one interrupted mid-work, or one that received an Input after its latest Report, starts again with a recovery note and the Inputs delivered to it that its Executor Session did not take, as a retry does; one that had reported since keeps its Session. The DshExecutor reports each at start (`resume`), oldest Ticket first, and queues again a launch that waits |
-| Passes | `evaluateDue()` | Unless processing is paused: starts the Evals of the Threads whose queued Triggers wait, one per Thread with the Triggers queued meanwhile as one batch; queues the Triggers of an Eval past its deadline again, twice in a row, and records it `unavailable` the third time; and resumes the ended Tickets a person's message reached during a pause, if their Mandates still hold. An Eval whose candidate has not reached the main Session does not expire. While processing is paused, no Eval expires, and once it resumes each deadline moves later by the pause's length |
+| Passes | `evaluateDue()` | Unless processing is paused: starts the Evals of the Threads whose queued Triggers wait, one per Thread with the Triggers queued meanwhile as one batch; queues the Triggers of an Eval past its deadline again, twice in a row, and records it `unavailable` the third time; and resumes the ended Tickets a person's message reached during a pause, if their Mandates still hold. An Eval whose candidate has not reached its Session does not expire. While processing is paused, no Eval expires, and once it resumes each deadline moves later by the pause's length |
 | Settings | `policyChanged(from, to, effects)` | Tells each live Ticket the change bears on how (`policyEffects` in `src/policy.ts`: a rule it was accepted under changed or no longer applies, its requester may no longer start work, or proactive work is no longer accepted), and restarts the Evals in progress under the new version |
 
 The Engine keeps batching, authorization, fan-out, resume and attention lifecycle rules private. Several shared predicates make these rules consistent:
 
-- `waitsForPerson` (`src/core/model.ts`): the latest Assignment reported `blocked` or `failed`, and no human message has arrived since. Automatic Inputs and failed launches remain held while this is true.
-- `followupOwners`: the Tickets still responsible for a human follow-up received on their own Threads. A Ticket can be live or ended without a human stop and waiting to resume. Handing back the message ends that ownership.
+- `waitsForPerson` (`src/core/model.ts`): the latest Assignment reported `blocked` or `failed`, and no human message has arrived since. Automatic Inputs and failed launches remain held while this is true. A hold is not this wait: it locks the Inputs it names, and the rest of the Ticket carries on.
+- `holdsInput` (`src/core/model.ts`): an open hold locks an Input while it names it, or names none and so holds the whole Ticket. The Input waits until `release` settles the conflict.
+- `followupOwners`: the Tickets still responsible for a human follow-up received on their own Threads. A Ticket can be live or ended without a human stop and waiting to resume. Handing back the message ends that ownership. Its `underEval` option keeps the owner visible while an Eval holds the message, because every person's message is now queued for one and the main Session reads it as a candidate.
 - `settled`: a Decision resolved the request; stop, unavailable, routed and refused-stop Decisions do not count.
 - `ticketStage` (`src/core/stage.ts`): implements the stage table in [003 Execution](003-execution.md).
 
@@ -171,9 +172,11 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 
 | Kind | Handler | Does | At once | Retry |
 | --- | --- | --- | --- | --- |
-| `assessment` | MasterAssessor | Steers an Eval's candidate card into the main Session's turn, then tells the Engine it was delivered, which starts the Eval's deadline | 4, none while paused | 2 s doubling to 60 s |
+| `assessment` | MasterAssessor | Creates the Eval's Session if needed, steers the candidate card into its turn, then tells the Engine it was delivered, which starts the Eval's deadline | 4, none while paused | 2 s doubling to 60 s |
 | `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
 | `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
+| `review` | Reviewers | Runs a review of a Ticket's result in a Session of its own, with the deploy phase when it is on; the result's verdict comes back through the Engine | 4, none while paused | A passing failure runs again after 5 s doubling to 300 s, three times |
+| `review-verdict` | Reviewers | Ends the Reviewer Session's turn once its verdict is recorded, so a review never waits on a tool call to finish | 16 | 1 s doubling to 30 s |
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
 | `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
 | `reply` | Outbox | Sends a message for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
@@ -208,9 +211,15 @@ Transient provider and network failures get three retries. Launches use effect b
 
 ### MasterAssessor
 
-`MasterAssessor` (`src/app/assessment.ts`) lets the main Session assess proactive candidates. `request` queues an assessment effect; `release` drops cached state when its Eval ends.
+`MasterAssessor` (`src/app/assessment.ts`) delivers each candidate to a Session of the Eval's own, `eval-<eval id>` (`evalSessionId` in `src/app/sessions.ts`), created with the orchestrator role on first delivery. `request` queues an assessment effect; `release` drops cached state when its Eval ends. A message that arrives on a Thread under assessment is steered into that Eval's Session as a `followup_while_assessing` card (the `trigger.queuedBehindEval` event), where `orchestrator_route` may dispose of it at once; one it leaves alone waits for the next Eval.
 
 Its `context`, `read` and `decide` methods serve `orchestrator_eval`, `orchestrator_eval_read` and `orchestrator_eval_decide`. They provide bounded Thread context through `SourceRegistry.threadContext`, repository context, and decision submission. A kind without a context reader supplies only the Trigger and batch.
+
+### Reviewers
+
+`Reviewers` (`src/app/reviewers.ts`) is the phase between a worker's result and its person. With `executor.reviews` on, a `ready` Report asks for a review, which the core's `Reviews` part records on the Ticket and hands to this port; it queues a `review` effect, which opens `reviewer-<ticket>-<round>` (`reviewerSessionId` in `src/executor/dsh.ts`) with the reviewer role, tells it what to review with the worker's directory, and runs the deploy phase (`deployCommand`, then `e2eCommand`, with `sh` in the Ticket's directory) when `executor.deploy` is on. The verdict comes through `Engine.reviewEnded`: a pass delivers the result as the Report would have, a return sends the findings to the worker as its next Assignment, and a review that cannot run or ends its turn without a verdict leaves the result to a person (`unfinished`).
+
+The core's `Reviews` (`src/core/reviews.ts`) records the rounds (`REVIEW_ROUNDS`, 3), decides through `reviewRequired` whether a `ready` Report asks for a review, and ends a passed Ticket through `Tickets.finishReviewed`. A test stands in for the Reviewer Session's model through `Reviewers.answer`, and finishes a review by its Session id with `Reviewers.reviewed`.
 
 `assessmentOutcome` converts the model's answer for `Engine.decide`. Evals checks inferred acceptance against the current Policy again.
 
@@ -246,7 +255,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 | --- | --- |
 | `src/app/runtime.ts` | The composition root: builds the parts with the interfaces they use, registers the routes and the Source host, and starts and stops dsh-superagent |
 | `src/app/notices.ts` | Domain events and worker reports into notices and relays for the main Session |
-| `src/app/tools/main.ts`, `src/app/tools/executor.ts` | Tool arguments of the main Session and the Executor Sessions into calls of the core classes, and their results into cards |
+| `src/app/tools/main.ts`, `src/app/tools/executor.ts`, `src/app/tools/reviewer.ts` | Tool arguments of the main Session, the Executor Sessions and the Reviewer Sessions into calls of the core classes, and their results into cards |
 | `src/app/http.ts`, `src/app/views/`, `src/app/api.ts` | HTTP requests into calls, and Store reads into the panel's views; `api.ts` types every route for the panel |
 | `src/app/resources.ts`, `src/app/links.ts`, `src/app/cards.ts` | Resource names into reads, source messages into links, records into compact cards for models |
 | `src/sources/github*.ts`, `src/sources/feishu*.ts`, `src/sources/poll.ts` | GitHub and Feishu payloads into Triggers and Thread facts, and messages into CLI calls |
@@ -279,6 +288,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 - Outbox applies the Feishu chat word limit.
 - `src/app/links.ts` resolves Feishu message links and `repliedTo`. It and Runtime read settings with `feishuSettings`.
 - `src/app/resources.ts` reads the `feishu/` and `github/` originals; `src/app/cards.ts` uses `pullOf` for Ticket cards.
+- `lanes` and `lane/<key>` in `src/app/resources.ts` are the main Session's read across lanes, whatever Source each lane is; `storeReads.lanes` lists every Thread with activity, not only the subscribed ones.
 - Runtime sends `pullEndNotices` for merged or closed Tickets.
 - Executor tools bind reported pull requests with `readPull` and `claimPull`, using the GitHub context exposed by Runtime.
 - MasterAssessor reads repository files with `readRepositoryPath`.
@@ -291,21 +301,22 @@ Some generic modules still refer directly to GitHub or Feishu:
 | Path | Responsibility |
 | --- | --- |
 | `src/index.ts` | The main plugin entry: reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses |
-| `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
+| `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveGithub` and `resolveFeishuBot` read the optional repository and accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
 | `src/policy.ts` | The Policy: the settings schemas by block, the Policy version, the gate and Mandate revalidation |
 | `src/admission.ts` | The admission table's values, each cell's options and defaults, shared with the panel |
 | `src/limits.ts` | The limits of the values a person sets, which the settings schemas check and the panel's fields offer |
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
-| `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
+| `src/core/model.ts` | The domain types, among them the typed Ticket, its `Hold` and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `holdsInput`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
 | `src/core/ports.ts` | The ports: `Repositories`, `Policy`, `SourceScope`, `Assessor`, `Executor`, `Outbox`, and the domain events |
 | `src/core/engine.ts` | The Engine, the core's entry point, and the role interfaces `EngineForSources`, `EngineForMainSession`, `EngineForPeople`, `EngineForSettings` and `EngineForExecutor` |
 | `src/core/part.ts` | `EnginePart`, the base of the Engine's parts, and `EngineOptions` |
 | `src/core/intake.ts` | `Intake`: Triggers from Sources, to their Tickets and, unless a person's message reached one, to Eval |
 | `src/core/evals.ts` | `Evals`: the Evals of Threads and their Decisions |
-| `src/core/tickets.ts` | `Tickets`: the Ticket lifecycle, the Threads a Ticket follows, Subscriptions and Inputs |
+| `src/core/tickets.ts` | `Tickets`: the Ticket lifecycle, the Threads a Ticket follows, Subscriptions, Inputs, and a hold on the Inputs a conflict is about |
 | `src/core/assignments.ts` | `Assignments`: the Executor's facts and its workers' Reports |
+| `src/core/reviews.ts` | `Reviews`: the reviews of a ticket's result, their rounds and verdicts |
 | `src/core/replies.ts` | `Replies`: the Engine's Channel writes |
 | `src/core/stage.ts` | `ticketStage` and `canRetry`: the Ticket stages of [003 Execution](003-execution.md) |
 | `src/core/errors.ts` | `UserError` and `USER_ERRORS` |
@@ -320,7 +331,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
+| `src/app/migration.ts` | The schema 12 migration: schema 10 to 11, then `mergeConversationThreads`, which folds DingTalk episode Threads into one per conversation |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -330,7 +341,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
 | `src/app/sessions.ts` | Sessions |
+| `src/app/session-actions.ts` | What a Session called, read from the `tool/call` events of its log: the void verdict of a Reviewer that changed the code it judged, the evidence a ready report needs, and `readConversation`, whether the main Session read the conversation of a chat trigger before it attached or answered it |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
+| `src/app/reviewers.ts` | `Reviewers`: each review of a ticket's result in a Session of its own, the deploy phase a review may run, and its verdict |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
@@ -338,10 +351,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/source-context.ts` | `sourceContextOf`: each Source kind's `SourceContext` |
 | `src/app/links.ts` | `sourceLink`, the page of a Trigger's message, and `candidateCard` |
 | `src/app/cards.ts` | Compact cards of Triggers, Tickets, Threads and Decisions for models, the closed set of ticket card states `TICKET_STATES`, and `textPage` |
+| `src/app/desk.ts` | The desk: one compact line per open Ticket for the `desk` resource, and the summary of at most 600 characters the main Session's prompt carries |
 | `src/app/resources.ts` | `RESOURCES` and `readResource`: what `orchestrator_read` reads, for each role |
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
+| `src/app/tools/reviewer.ts` | A Reviewer Session's tools: reading the ticket and its worker's transcript, and the verdict |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
@@ -372,8 +387,22 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
 | `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, `sent` or `gone` |
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
+| `src/sources/dingtalk.ts` | The DingTalk kind and plugin entry, exported as `./dingtalk-watch`; the operator's own account, so no bot identity |
+| `src/sources/dingtalk-trigger.ts` | DingTalk messages as Triggers, by one rule for live events and history pages; episodes as threads, the noise gate, the operator's own messages |
+| `src/sources/dingtalk-loops.ts` | The DingTalk loops: the `dws event consume` consumer and the history reconciliation of known conversations |
+| `src/sources/dingtalk-channel.ts` | The DingTalk Channel: a direct or an addressed group message as the operator, always `sent`; the working reaction, and the streaming card an acknowledgement opens and the reply of its thread finishes |
+| `src/sources/dingtalk-read.ts` | The `dingtalk/` reads of a Trigger's episode, root and parent, and `dingtalkThreadContext` |
+| `src/sources/dingtalk-names.ts` | DingTalk display names: a sender's nick resolved through `dws contact user search` to 花名（真名）, cached in the KV, enriching each Trigger's meta and the history transcript |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
+| `src/sources/jira.ts` | The Jira kind and plugin entry, exported as `./jira-watch`: projects, the Issues and comments they receive, their Channel and `jira/` reads |
+| `src/sources/jira-trigger.ts` | Jira Issues and comments as Triggers, with the assignee and `[~account]` that address the agent, and Jira addresses |
+| `src/sources/jira-loops.ts` | The Jira poll round: one JQL search advanced by `updated`, deduplicated by Trigger ID, and the close of an Issue whose status entered the done category |
+| `src/sources/jira-channel.ts` | The Jira Channel: a comment on the Issue, `sent` or `gone`, scanned for its own marker before it posts |
+| `src/sources/jira-read.ts` | The `jira/` reads of an Issue and its comments, and `jiraThreadContext` |
+| `src/sources/jira-text.ts` | Markdown to Jira wiki markup (`toWiki`) and the hidden marker (`jiraMarker`, `hasMarker`) that makes a comment idempotent |
+| `src/sources/gitlab.ts` | The GitLab kind and plugin entry, exported as `./gitlab-watch`: the agent's merge requests in a group, polled for the Tickets that follow them. It has no Policy, Channel or Trigger |
+| `src/sources/gitlab-mr.ts` | The merge request rules: which Ticket follows an MR (`observeMr`), the closes it reports to the Engine, and `mrEndNotices`, the notice of a Ticket that ended merged or closed |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
@@ -397,7 +426,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts`, `src/sources/feishu.ts`, `src/sources/dingtalk.ts`, `src/sources/jira.ts` and `src/sources/gitlab.ts` are also the entries of the five Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./feishu-watch`, `./dingtalk-watch`, `./jira-watch` and `./gitlab-watch`. The bundle's `cordis.patch.yml` inserts the six plugins, with Feishu, Jira and GitLab disabled.
 
 ## Tests
 
@@ -408,8 +437,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
+| `tests/jira.spec.ts` | The Jira Source on a `SourceContext`: Issues and comments as Triggers, assignment and mentions, poll deduplication, the close of a done Issue, the Channel's marker and `gone`, `toWiki` |
+| `tests/gitlab.spec.ts` | The GitLab Source on a `SourceContext`: an MR claimed by the branch of its Ticket, the close it reports, its terminal notice, and the authors and branches it ignores |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
+| `tests/dingtalk.spec.ts` | The DingTalk Source: events as Triggers, episodes and the noise gate, the operator's own messages, the replies it sends, its Policy, its reads, and the consumer with the history recovery |
+| `tests/dingtalk-names.spec.ts` | DingTalk display names: 花名（真名） resolution, its KV cache and the cached nobody, trigger enrichment, and telling the operator apart |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
@@ -419,8 +452,15 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/outbox.spec.ts` | The Outbox on a running Runtime: messages wait while processing is paused or their Source is not installed |
 | `tests/cache.spec.ts` | `TextCache` |
 | `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |
+| `tests/eval-sessions.spec.ts` | Each Eval in a Session of its own: its candidate, tools and title; every open Ticket on the card; a message steered into a running Eval, routed there or left to the next; what stays on the main Session |
 | `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
+| `tests/reviews.spec.ts` | A review of a result in a Session of its own: passing, returning with findings, its rounds, one that ends without a verdict, and the verify commands reaching the Reviewer instead of a subprocess |
+| `tests/merge-request-and-restart.spec.ts` | A report's merge request resolved from its URL or short form, and a review whose rounds are spent telling the main Session so it can restart the worker with an instruction |
+| `tests/ledger-watchdog.spec.ts` | The report ledger and its authors, review rounds that count only reviews with a verdict, a ready result after the rounds are spent ending `unreviewed`, the liveness watchdog's probe and `ticket.stalled`, and the desk summary |
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
+| `tests/capability-parity.spec.ts` | One allow list for the main Session, workers and reviewers, and the void verdict of a Reviewer Session that changed a file |
+| `tests/ready-evidence.spec.ts` | A ready report's evidence: refused after a change without evidence, with no run, or with no run after the last change; kept on the ledger once it stands |
+| `tests/conversation-guard.spec.ts` | The conversation guard: an attach or an answer of a chat trigger is refused until its conversation was read, and `trigger/<id>` carries that conversation's live history or says it is unavailable |
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
@@ -483,7 +523,7 @@ Read caches use bounded in-memory `TextCache` instances and are lost on restart.
 
 Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
-`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
+`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of schema 10 by both steps and one of schema 11 by the conversation merge, once, at start, and refuses an older one.
 
 ## Model-facing interfaces
 
@@ -500,7 +540,7 @@ The main Session has 14 application tools:
 | Communicate and unsubscribe | `orchestrator_reply`, `orchestrator_thread_unsubscribe` |
 | Configure | `orchestrator_settings_save`, `orchestrator_policy_sync`, `orchestrator_prompts_save` |
 
-`orchestrator_route` accepts 1–20 decisions in order. Each accept, attach, stop or ignore runs as a separate Engine command. It also permits ignoring an inferred candidate directly from its card. `orchestrator_ticket_note` sends a fact as context, not authority.
+`orchestrator_route` accepts 1–20 decisions in order. Each accept, answer, attach, stop or ignore runs as a separate Engine command; an answer is a `reply` of purpose `answer` followed by an ignore Decision with reason `answered`, and the words `chatter` and `duplicate` given as an ignore reason are recorded as those reason codes. It also permits ignoring an inferred candidate directly from its card. `orchestrator_ticket_note` sends a fact as context, not authority.
 
 Settings saves select `policy`, `eval`, `executor`, `pause`, or `source`; the last also names its Source id. A prompt save with `preview: true` composes text without saving.
 
@@ -529,7 +569,7 @@ Each Executor has six application tools:
 
 A hand-back returns `queued: false` if another Ticket still owns the message, or this Ticket never owned it. For example, a bot message went to Eval independently.
 
-The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `WORK_TOOLS` in `src/app/sessions.ts` retains available file, search, shell, job, web, skill, todo and subagent tools. Workers do not receive tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
+The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `SESSION_TOOLS` in `src/app/sessions.ts` is the one tool surface of the main Session, workers and reviewers, filtered to what the profile registered: file, search, shell, job, web, skill, todo and subagent tools. No role receives tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
 
 ### Result shapes and assessment context
 
@@ -540,7 +580,7 @@ Settings and prompt saves return the saved configuration. Policy sync returns th
 `orchestrator_eval` returns context rather than instructions. Assessment instructions live in `runtime/admission` (`prompts/admission.md`), and rules in `runtime/policy`. Its context includes:
 
 - The Trigger text, up to 4,000 characters, with image ids and other Triggers in the batch.
-- Up to eight `related_tickets`, open ones first, and `tickets_total`.
+- `related_tickets`: every open Ticket, newest first, up to `OPEN_TICKET_CARDS` (60), then up to `ENDED_TICKET_CARDS` (8) ended ones of the Thread that ended within `ENDED_TICKET_CARD_DAYS` (7), and `tickets_total`. Older ended Tickets are archived from the card and remain in the `tickets` resource.
 - The Eval's `policy_version`.
 - A Thread window: the first five messages and five on either side of the Trigger. Messages use `{id, from, at, text}`, normally limited to 400 characters, or 1,200 for the two on either side. Truncated messages include `chars`; image references use `images`.
 - Other loaded messages as `{id, from, preview}` stubs of 50 characters. `orchestrator_eval_read` expands them by id.
@@ -580,11 +620,12 @@ The names `event/`, `task/` and `observation/` of earlier versions still resolve
 
 ### Messages delivered to Sessions
 
-These messages are steered into the main Session's turn:
+These messages are steered into an orchestrator Session's turn: the candidate and `followup_while_assessing` into the Eval's own Session, the rest into the main Session:
 
 | Message | Content |
 | --- | --- |
 | Candidate | Batch Trigger cards, Thread, `related_tickets`, `tickets_total`, `delivered_to`, referenced Tickets from Issue/PR links, `handed_back` reasons and the next action |
+| `followup_while_assessing` | The card of a message that arrived on the Thread under assessment, and the note that `orchestrator_route` may dispose of it now |
 | `follow_up` | One message as its Executor sees it, `replies_to`, receiving Tickets, and the reminder that Executors decide it while the main Session may only stop work |
 | `worker_report` | Ticket card, originating Trigger, state and summary up to 600 characters; `chars` and a read pointer when truncated |
 | `worker_attention` | Ticket card carrying the question |

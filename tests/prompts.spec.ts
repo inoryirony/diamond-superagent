@@ -15,7 +15,7 @@ import type { Variable } from '../src/app/execution-environment.ts'
 /** The execution environment outside any ticket, as the runtime passes it once setup has finished. */
 const variables = (): Variable[] => [{ key: 'DSH_SUPERAGENT_GITHUB_REPOSITORY', value: 'acme/widgets', description: { zh: '仓库', en: 'The repository' }, owner: 'github' }]
 const ENVIRONMENT_LINE = '- DSH_SUPERAGENT_GITHUB_REPOSITORY = "acme/widgets": The repository.'
-const promptsOf = (store: Store, maxChars = 100000) => new Prompts(store, () => maxChars, variables, () => true)
+const promptsOf = (store: Store, maxChars = 100000) => new Prompts(store, () => maxChars, variables, () => true, () => true)
 function withStore(body: (store: Store, dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'prompts-')); const store = new Store(join(dir, 'db'))
   try { body(store, dir) } finally { store.close(); rmSync(dir, { recursive: true, force: true }) }
@@ -45,10 +45,12 @@ it('saves team sections and skills as versions that survive a restart, with hist
 })
 
 it('assembles every role from fixed sections around the team sections, whatever the configuration says', () => {
-  const config = { communication: 'Say little.', scope: '', delivery: 'Attach screenshots.', skills: {} }
+  const config = { communication: 'Say little.', scope: 'Stay small.', delivery: 'Attach screenshots.', skills: {} }
   for (const role of ['orchestrator', 'worker'] as const) {
     const names = promptParts(config, role, 'env').map(part => part.name)
-    expect(names).toEqual(['runtime/shared', `runtime/${role}`, 'communication', 'delivery', 'runtime/subscriptions', 'runtime/replies', role === 'orchestrator' ? 'runtime/dispatch' : 'runtime/work', ...role === 'orchestrator' ? ['runtime/admission'] : [], 'runtime/handoff', 'runtime/environment'])
+    // Team sections describe work a Session does itself: the worker gets all three, the main Session only Communication.
+    const team = role === 'worker' ? ['communication', 'scope', 'delivery'] : ['communication']
+    expect(names).toEqual(['runtime/shared', `runtime/${role}`, ...team, 'runtime/subscriptions', 'runtime/replies', role === 'orchestrator' ? 'runtime/dispatch' : 'runtime/work', ...role === 'orchestrator' ? ['runtime/admission'] : [], 'runtime/handoff', 'runtime/environment'])
     const prompt = composePrompt(config, role)
     for (const fixed of [sharedPrompt, role === 'orchestrator' ? masterPrompt : workerPrompt, guides.subscriptions!, guides.replies!, handoffPolicy(role)]) expect(prompt).toContain(fixed)
     expect(prompt.endsWith(handoffPolicy(role))).toBe(true)
@@ -108,7 +110,7 @@ it('lists a ticket\'s execution environment in its prompt, and says setup is inc
     expect(promptsOf(store).compose(defaultPrompts(), 'worker', ticket).endsWith('- DSH_SUPERAGENT_DIR = "/srv/work/fix-1": This ticket\'s directory.')).toBe(true)
     expect(promptParts(defaultPrompts(), 'worker', 'env').at(-1)).toEqual({ name: 'runtime/environment', kind: 'generated', key: 'runtime/environment',
       text: 'env' })
-    expect(new Prompts(store, () => 100000, () => undefined, () => false).compose(defaultPrompts(), 'worker')).toContain('dsh-superagent is waiting for setup')
+    expect(new Prompts(store, () => 100000, () => undefined, () => false, () => false).compose(defaultPrompts(), 'worker')).toContain('dsh-superagent is waiting for setup')
   })
 })
 
@@ -119,7 +121,7 @@ it('registers the built-in Source skills, Feishu only with a Feishu bot, before 
     expect(skills.map(([name]) => name)).toEqual(['feishu', 'github', 'release'])
     expect(skills[1]![1]).toContain('## CLI usage')
     expect(skills[2]![1]).toBe('Tag releases.')
-    expect(new Prompts(store, () => 100000, variables, () => false).skills(config).map(([name]) => name)).toEqual(['github', 'release'])
+    expect(new Prompts(store, () => 100000, variables, () => false, () => true).skills(config).map(([name]) => name)).toEqual(['github', 'release'])
   })
 })
 

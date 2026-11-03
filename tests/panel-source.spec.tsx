@@ -16,7 +16,7 @@ it('shows each Source\'s state on the Source status and opens its settings from 
   expect(text()).toContain(zh['sourceState.error'])
   expect(text()).toContain('socket closed')
   expect(all('.dt-card')).toHaveLength(0)
-  server.setup = { ...server.setup, problem: problemOf('agentCliUnset') }
+  server.setup = { ...server.setup, problems: [problemOf('agentCliUnset')] }
   await remount()
   await click(zh['tab.source'])
   await click(zh.sourceOpenSettings)
@@ -121,16 +121,18 @@ it('shows the account each CLI signs in as, and keeps a saved CLI on screen whil
 })
 
 it('points a setup problem at the settings that fix it', async () => {
-  server.setup = { ...server.setup, problem: problemOf('agentCliUnset'), accounts: null }
+  server.setup = { ...server.setup, problems: [problemOf('agentCliUnset')], accounts: null }
   // jsdom has no scrolling; mock scrollIntoView to record which card the link brings into view.
   const scroll = vi.fn()
   Element.prototype.scrollIntoView = scroll
   await mount()
+  // Setup problems are listed in the folded engine half of the overview.
+  await click(all('.dt-disclosure-row')[0]!)
   expect(text()).toContain(zh.problemSetup)
   expect(text()).toContain(zh['setup.agentCliUnset'])
-  // Nothing runs while setup waits, so the Executor says so instead of counting.
-  expect(text()).toContain(zh.executorWaitingSetup)
-  expect(all('.dt-stat').map(stat => stat.textContent)).not.toContain('执行中2 / 3')
+  // A Source's own problem leaves the Executor running, so it still counts.
+  expect(text()).not.toContain(zh.executorWaitingSetup)
+  expect(all('.dt-stat').map(stat => stat.textContent)).toContain('执行中2 / 3')
   expect(text()).toContain('在设置 › 来源的 GitHub 卡片修正后保存，会重新检查')
   await click(find(zh.problemSetup, 'button, a, [role="button"]'))
   expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
@@ -139,23 +141,30 @@ it('points a setup problem at the settings that fix it', async () => {
   expect(scroll.mock.contexts).toContain(all('.dt-card')[1])
   delete (Element.prototype as Partial<Element>).scrollIntoView
   await click(find(zh['settingsGroup.deployment'], '.dt-settings-link'))
-  expect(text()).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
+  // The Deployment page shows only what blocks everything; this problem belongs to the GitHub card.
+  expect(text()).not.toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
+  await click(find(zh['settingsGroup.source'], '.dt-settings-link'))
   // After a fix outside dsh-superagent, a check runs setup again.
   await click(zh.setupCheck)
+  // The Executor keeps running while only a Source has a problem, so the restart asks first.
+  expect(server.requests.some(request => request.path === 'setup/check')).toBe(false)
+  await click(zh.confirm)
   expect(server.requests.filter(request => request.path === 'setup/check')).toEqual([{ path: 'setup/check', method: 'POST' }])
   expect(text()).toContain(zh.setupChecking)
-  server.setup = { ...server.setup, problem: problemOf('gitTooOld') }
+  server.setup = { ...server.setup, problems: [problemOf('gitTooOld')] }
   await remount()
   await click(zh['tab.overview'])
+  await click(all('.dt-disclosure-row')[0]!)
   await click(find(zh.problemSetup, 'button, a, [role="button"]'))
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.deployment'])
   expect(text()).toContain('部署检查未通过：git 没有读取 dsh-superagent 为 github.com 写的凭据配置')
 })
 
 it('shows a failed Feishu bot check as a problem of the Feishu Source only, with a check after a fix outside dsh-superagent', async () => {
-  server.setup = { ...server.setup, feishuProblem: problemOf('feishuBotNotReady', { app: 'cli_bot', status: 'missing' }),
+  server.setup = { ...server.setup, problems: [problemOf('feishuBotNotReady', { app: 'cli_bot', status: 'missing' })],
     accounts: { ...server.setup.accounts!, feishu: null } }
   await mount()
+  await click(all('.dt-disclosure-row')[0]!)
   expect(text()).toContain(zh.problemSetupFeishu)
   expect(text()).not.toContain('飞书 来源异常')
   await click(find(zh.problemSetupFeishu, 'button, a, [role="button"]'))
@@ -183,12 +192,12 @@ it('leaves Feishu out of a GitHub-only deployment', async () => {
 })
 
 it('shows the Sources waiting for the deployment check, and the problem on the Source that fixes it, with its link', async () => {
-  server.setup = { ...server.setup, problem: problemOf('repositoryUnset'), accounts: null }
+  server.setup = { ...server.setup, problems: [problemOf('repositoryUnset')], accounts: null }
   await mount()
   await click(zh['tab.source'])
   const rows = all('.dt-form > .dt-list > .dt-row')
-  // The GitHub Source is where the problem is fixed, so it shows the error; Feishu waits.
-  expect(rows.map(row => row.querySelector('.dt-status-text')?.textContent)).toEqual(['等待部署检查', '出错'])
+  // The problem is the GitHub Source's own, so it shows the error and Feishu is not held back by it.
+  expect(rows.map(row => row.querySelector('.dt-status-text')?.textContent)).toEqual(['出错', '出错'])
   expect(text()).not.toContain('Waiting for setup')
   expect(rows[1]!.textContent).toContain('部署检查未通过：GitHub 来源没有设置监听的仓库。')
   await click(find(zh.sourceOpenSettings, '.dt-row button'))
@@ -224,7 +233,7 @@ it('shows a setup problem on its Source card within one read of the settings, wh
   await mount()
   const card = () => document.getElementById('dt-source-github')!
   expect(card().textContent).not.toContain(zh['setup.agentCliUnset'])
-  server.setup = { ...server.setup, problem: problemOf('agentCliUnset') }
+  server.setup = { ...server.setup, problems: [problemOf('agentCliUnset')] }
   // The settings are read every five seconds, as the state is; the Source settings do not read the Source status.
   await act(async () => { await vi.advanceTimersByTimeAsync(5000) }); await settle()
   expect(server.requests.filter(request => request.path === 'settings')).toHaveLength(2)

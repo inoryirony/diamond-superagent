@@ -115,11 +115,26 @@ function ticketNote(ticket: Ticket, stage: TicketStage): { text: string; error: 
   if ((stage.action !== 'blocked' && stage.action !== 'failed') || !summary) return undefined
   return { text: preview(summary.split('\n')[0]!), error: stage.action === 'failed' }
 }
-export function ticketSummary(ticket: Ticket) {
+/**
+ * The Thread that is the Ticket's outcome for a person, such as the pull request a worker opened: the first Thread it
+ * follows that has a URL and belongs to it (`own`), so an overview row can show where the result is.
+ */
+export function outcomeThread(store: Pick<Store, 'threads' | 'read'>, ticket: Ticket): string | undefined {
+  const own = ticket.follows?.filter(follow => follow.own).map(follow => follow.thread) ?? []
+  // The Thread may have left the Store, such as a pull request dropped long after the ticket ended.
+  return own.find(key => { const thread = store.threads.get(key); return !!thread && !!threadUrl(store, thread) })
+}
+export function ticketSummary(ticket: Ticket, store?: Pick<Store, 'threads' | 'read'>) {
   const stage = ticketStage(ticket)
   const note = ticketNote(ticket, stage)
   const state = liveTicket(ticket) ? 'open' as const : 'ended' as const
+  const review = (ticket.reviews ?? []).at(-1)
+  const outcome = store && outcomeThread(store, ticket)
   return { id: ticket.id, title: ticket.title, state, ...stage, ...note ? { note } : {},
+    // What the review says about the result, and where the result is: the round, its verdict and its findings.
+    ...review ? { review: { round: review.round, ...review.ended ? { outcome: review.ended.outcome, summary: review.ended.summary,
+      ...review.ended.unfinished ? { unfinished: true } : {}, ...review.ended.findings?.length ? { findings: review.ended.findings } : {} } : {} } } : {},
+    ...outcome ? { outcome_url: threadUrl(store, store.threads.get(outcome)!) ?? store.read.firstTrigger(outcome)?.url } : {},
     actions: { retry: canRetry(ticket), stop: liveTicket(ticket) }, strength: ticket.mandate.strength, ended: ticket.ended,
     attention: ticket.attention && { ...ticket.attention, question: markdown(ticket.attention.question) },
       assignments: ticket.assignments.length, inputs: ticket.inputs.length, undelivered: ticket.undelivered.length,
@@ -130,7 +145,7 @@ export function ticketSummary(ticket: Ticket) {
     updatedAt: ticket.updatedAt }
 }
 export type TicketSummaryView = ReturnType<typeof ticketSummary>
-function threadUrl(store: Store, thread: Thread): string | undefined {
+function threadUrl(store: Pick<Store, 'read'>, thread: Thread): string | undefined {
   return attribute(thread.meta.url) ?? store.read.firstTrigger(thread.key)?.url
 }
 export function threadFacts(store: Store, thread: Thread) {
@@ -138,7 +153,7 @@ export function threadFacts(store: Store, thread: Thread) {
   return { key: thread.key, source: thread.ref.source, title: threadTitle(store, thread), ...url ? { url } : {}, facts: (thread.meta.facts ?? {}) as ThreadFacts }
 }
 export type ThreadFactsView = ReturnType<typeof threadFacts>
-export const ticketLine = (view: Snapshot, ticket: Ticket) => ({ ...ticketSummary(ticket),
+export const ticketLine = (view: Snapshot, ticket: Ticket) => ({ ...ticketSummary(ticket, view.store),
   threads: view.threadsOf(ticket.id).map(thread => threadFacts(view.store, thread)) })
 export function threadTitle(store: Pick<Store, 'read'>, thread: Thread): string {
   const label = attribute(thread.meta.label)

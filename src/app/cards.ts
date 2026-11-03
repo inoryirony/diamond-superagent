@@ -7,27 +7,33 @@ import { batchLine, inputResource } from '../executor/dsh.ts'
 /** Collapses whitespace and truncates text for display previews while keeping code, angle brackets, and links intact for model readers. */
 export function preview(text: string): string { return text.replace(/\s+/g, ' ').slice(0, 160) }
 export function triggerCard(trigger: Trigger, disposition?: TriggerDisposition) {
-  return { trigger_id: trigger.id, source: trigger.source, ...(trigger.url ? { source_url: trigger.url } : {}), actor: trigger.actor.id, thread: threadKey(trigger.threads[0]!), human: trigger.human, at: trigger.at,
+  return { trigger_id: trigger.id, source: trigger.source, ...(trigger.url ? { source_url: trigger.url } : {}), actor: trigger.actor.id,
+    ...(typeof trigger.meta.actor_name === 'string' ? { actor_name: trigger.meta.actor_name } : {}),
+    ...(trigger.meta.operator === true ? { operator: true } : {}),
+    thread: threadKey(trigger.threads[0]!), human: trigger.human, at: trigger.at,
     preview: preview(trigger.text), chars: trigger.text.length, read: `trigger/${trigger.id}`,
     ...(disposition ? { disposition: { ...(disposition.filtered ? { filtered: reasonText(disposition.filtered) } : {}),
       ...(disposition.decisionId ? { decision_id: disposition.decisionId } : {}),
       delivered_to: disposition.fanout } } : {}) }
 }
 /** The states a ticket card shows: an open ticket's stage (docs/003), and an ended ticket's outcome. */
-export const TICKET_STATES = ['person/delivery', 'person/answer', 'person/review', 'person/blocked', 'person/failed', 'working', 'working/queued', 'idle',
-  'completed', 'merged', 'closed', 'dropped', 'stopped'] as const
+export const TICKET_STATES = ['person/delivery', 'person/answer', 'person/review', 'person/returned', 'person/blocked', 'person/failed', 'person/held',
+  'review/running', 'working', 'working/queued', 'idle', 'completed', 'merged', 'closed', 'dropped', 'stopped'] as const
 export type TicketCardState = typeof TICKET_STATES[number]
 function cardState(ticket: Ticket): TicketCardState {
   if (ticket.ended) return ticket.ended.outcome
-  const stage = ticketStage(ticket)
+  // A card says whether a running review or a returned result belongs to a person or to the worker, as the stage rules do.
+  const stage = ticketStage(ticket, true)
   if (stage.stage === 'person') return `person/${stage.action}`
+  if (stage.stage === 'review') return 'review/running'
   return stage.stage === 'idle' ? 'idle' : stage.stage === 'working' && stage.action ? 'working/queued' : 'working'
 }
 export function ticketCard(ticket: Ticket) {
   const ended = ticket.ended && { at: ticket.ended.at, by: ticket.ended.by, reason: ticket.ended.reason ?? ticket.ended.outcome }
-  const { attention } = ticket
+  const { attention, hold } = ticket
   return { ticket_id: ticket.id, title: ticket.title, state: cardState(ticket), strength: ticket.mandate.strength,
     ...(pullOf(ticket) ? { pr_number: pullOf(ticket) } : {}), ...(ended ? { ended } : {}),
+    ...(hold && !hold.released ? { hold: { question: hold.question, ...hold.triggerId ? { trigger_id: hold.triggerId } : {}, at: hold.at } } : {}),
     ...(attention ? { attention: { question: attention.question, ...attention.triggerId ? { trigger_id: attention.triggerId } : {} } } : {}),
     preview: preview(latestReport(ticket)?.summary ?? ''), read: `ticket/${ticket.id}` }
 }
@@ -90,7 +96,31 @@ export function textPage(resource: string, text: string, offset: number, limit: 
   const end = Math.min(text.length, offset + limit)
   return { resource, offset, total_chars: text.length, next_offset: end < text.length ? end : null, text: text.slice(offset, end) }
 }
-export function relatedTickets(tickets: readonly Ticket[]) {
-  const order = [...tickets].sort((a, b) => Number(!a.ended) === Number(!b.ended) ? b.createdAt.localeCompare(a.createdAt) : a.ended ? 1 : -1)
-  return { related_tickets: order.slice(0, 8).map(ticketCard), tickets_total: tickets.length }
+/** How many live tickets a candidate card carries at most: a hard guard against a flooded board, not an expected count. */
+export const OPEN_TICKET_CARDS = 60
+/** How many ended tickets of the candidate's thread a card carries at most. */
+export const ENDED_TICKET_CARDS = 8
+/** How long an ended ticket stays on candidate cards; older ones are archived from the card, and `orchestrator_read` tickets still lists them. */
+export const ENDED_TICKET_CARD_DAYS = 7
+/**
+ * The tickets a candidate card lists: every live ticket, newest first, then the ended ones of the thread that ended within
+ * `ENDED_TICKET_CARD_DAYS`; `tickets_total` tells when the limits cut some off, which `orchestrator_read` tickets pages through.
+ */
+export function relatedTickets(tickets: readonly Ticket[], now = new Date()) {
+  const newest = (a: Ticket, b: Ticket) => b.createdAt.localeCompare(a.createdAt)
+  const archived = new Date(now.getTime() - ENDED_TICKET_CARD_DAYS * 86_400_000).toISOString()
+  const open = tickets.filter(ticket => !ticket.ended).sort(newest).slice(0, OPEN_TICKET_CARDS)
+  const ended = tickets.filter(ticket => ticket.ended && ticket.ended.at > archived).sort(newest).slice(0, ENDED_TICKET_CARDS)
+  return { related_tickets: [...open, ...ended].map(ticketCard), tickets_total: tickets.length }
+}
+/** The card an Eval's Session gets when another message arrives on the Thread it assesses. */
+export function followupWhileAssessing(trigger: Trigger) {
+  return { kind: 'followup_while_assessing', trigger: triggerCard(trigger),
+    note: 'This message arrived on the same thread while you assess. Route it now with orchestrator_route (attach, ignore or accept), or answer it with orchestrator_reply and route ignore; otherwise it is assessed separately after your decision.' }
+}
+/** A short Session title for an Eval: the text of its first Trigger. */
+export function evalTitle(store: { threads: { active(): readonly { evaluating?: { id: string; triggerIds: string[] } }[] }; triggers: { get(id: string): { text: string } | undefined } }, evalId: string): string {
+  const evaluation = store.threads.active().find(thread => thread.evaluating?.id === evalId)?.evaluating
+  const text = evaluation && store.triggers.get(evaluation.triggerIds[0]!)?.text
+  return `eval ${(text ?? evalId).replace(/\s+/g, ' ').slice(0, 40)}`
 }

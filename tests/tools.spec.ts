@@ -7,6 +7,7 @@ import { KV } from '../src/kv.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, NOTE_WORDS } from '../src/infra/text.ts'
+import { reviewerSessionId } from '../src/executor/dsh.ts'
 import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host
@@ -111,6 +112,7 @@ it('answers every routing tool in one shape: the decision it recorded, why, and 
   const route = async (item: Record<string, unknown>) => ((await run('orchestrator_route', { decisions: [item] })).results as unknown[])[0]
   const other = feishu('3', '@bot 顺便看看这个')
   h.runtime.receive(other); await h.runtime.idle()
+  await h.readTrigger(h.runtime.masterId, other.id)
   expect(await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: other.id })).toEqual({ trigger_id: other.id, kind: 'attach',
     reason: expect.any(String), ticket: card })
   const status = await run('orchestrator_ticket_request_status', { ticket_id: ticket.id })
@@ -133,11 +135,38 @@ it('answers every routing tool in one shape: the decision it recorded, why, and 
   expect(TICKET_STATES).toContain(stopped.ticket.state)
 })
 
+it('answers a question from the route, where it was written and without a ticket, and records the named ignore reasons as codes', async () => {
+  const route = async (item: Record<string, unknown>) => ((await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [item] })).results as unknown[])[0]
+  const lark = vi.mocked(Commands.prototype.lark)
+  const question = feishu('1', '@bot 晨报的窗口是按什么日期算的？')
+  h.runtime.receive(question); await h.runtime.idle()
+  await h.readTrigger(h.runtime.masterId, question.id)
+  const answer = '按 opp_job.created_at 的自然日，见 report/window.py:12。'
+  expect(await route({ kind: 'answer', trigger_id: question.id, text: answer })).toEqual({ trigger_id: question.id, kind: 'answer', decision: 'ignore',
+    reason: 'Answered directly by the orchestrator, without a ticket' })
+  const sent = lark.mock.calls.map(([args]) => args as string[]).find(args => args.includes(answer))
+  expect(sent).toEqual(expect.arrayContaining(['+messages-reply', '--message-id', question.meta.messageId, answer]))
+  expect(h.runtime.store.tickets.list()).toEqual([])
+  expect(await route({ kind: 'answer', trigger_id: question.id })).toEqual({ trigger_id: question.id, kind: 'answer', refused: 'answer needs text' })
+  // A Feishu answer keeps the IM limit, which the Outbox checks before anything is queued.
+  const second = feishu('2', '@bot 再问一个')
+  h.runtime.receive(second); await h.runtime.idle()
+  await h.readTrigger(h.runtime.masterId, second.id)
+  expect(await route({ kind: 'answer', trigger_id: second.id, text: words(IM_WORDS + 1) })).toMatchObject({ refused: expect.stringContaining(`maximum is ${IM_WORDS}`) })
+  const chatter = feishu('3', '@bot 谢谢'), again = feishu('4', '@bot 修一下回归')
+  for (const trigger of [chatter, again]) h.runtime.receive(trigger)
+  await h.runtime.idle()
+  expect(await route({ kind: 'ignore', trigger_id: chatter.id, reason: 'chatter' })).toMatchObject({ decision: 'ignore', reason: 'Greeting, thanks, acknowledgement or small talk; nothing to do' })
+  expect(await route({ kind: 'ignore', trigger_id: again.id, reason: 'duplicate' })).toMatchObject({ decision: 'ignore', reason: 'An open ticket already covers this change' })
+  expect(h.runtime.store.triggers.disposition(chatter.id)?.decisionId).toBeDefined()
+})
+
 it('routes several triggers in one call, in order, and answers a refused or failed item without undoing the others', async () => {
   const { ticket } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const thanks = feishu('2', '@bot 谢谢'), request = feishu('3', '@bot 另一个问题'), other = feishu('4', '@bot 顺便看看这个'), more = feishu('6', '@bot 还有这个')
   for (const trigger of [thanks, request, other, more]) h.runtime.receive(trigger)
   await h.runtime.idle()
+  for (const trigger of [other, more]) await h.readTrigger(h.runtime.masterId, trigger.id)
   // One attach fails unexpectedly, as a busy database would.
   const attach = h.runtime.engine.attach.bind(h.runtime.engine)
   vi.spyOn(h.runtime.engine, 'attach').mockImplementation((ticketId, triggerId, note) => {
@@ -366,7 +395,7 @@ it('reads a trigger once with the message it replies to and the messages around 
   expect(page).not.toHaveProperty('read')
 })
 
-const relaysOf = (kind: string) => h.relays(h.runtime.masterId).filter(item => item.kind === kind)
+const relaysOf = (kind: string) => kind === 'candidate' ? h.cards() : h.relays(h.runtime.masterId).filter(item => item.kind === kind)
 const notices = () => h.agents.get(h.runtime.masterId)!.inject.mock.calls
   .map(([message]) => JSON.parse(message.content.map(block => block.type === 'text' ? block.text : '').join('')) as Record<string, unknown>)
 
@@ -392,11 +421,12 @@ it('shows a candidate with its thread\'s tickets open first, the tickets it reac
   expect((followup.related_tickets as { ticket_id: string }[]).map(card => card.ticket_id)).toEqual([a.id, b.ticket_id])
   expect(followup).toMatchObject({ tickets_total: 2, delivered_to: [a.id], thread: `feishu:${CHAT}:om_1` })
   expect(String(followup.next_action).length).toBeLessThanOrEqual(100)
-  // A message elsewhere that names a pull request reads the tickets that follow it.
+  // A message elsewhere still sees every open ticket, not the ended ones of other threads; a pull request it names adds only tickets not shown already.
   const thread = { key: 'github:123', ref: { source: 'github', id: '123' }, createdAt: '', subscriptions: [a.id], correlated: [], pending: [], meta: {} }
   h.runtime.store.threads.save(thread)
   h.runtime.receive(feishu('4', '@bot 看看 #123 的进展')); await h.runtime.idle()
-  expect(relaysOf('candidate').at(-1)).toMatchObject({ related_tickets: [], tickets_total: 0, referenced_tickets: [{ ticket_id: a.id }] })
+  expect(relaysOf('candidate').at(-1)).toMatchObject({ related_tickets: [{ ticket_id: a.id }], tickets_total: 1 })
+  expect(relaysOf('candidate').at(-1)).not.toHaveProperty('referenced_tickets')
 })
 
 it('relays a worker\'s report with its ticket card and the start of its summary, and a question with the card alone', async () => {
@@ -413,7 +443,11 @@ it('relays a worker\'s report with its ticket card and the start of its summary,
     read: `ticket/${ticket.id}/result` })
   expect(String(report.summary)).toBe(summary.slice(0, 600))
   expect(report.ticket).not.toHaveProperty('preview')
-  // The end of the ticket, which the ready report brought, comes with its card.
+  // With reviews on, the ready result waits in a review of its own: passing it ends the ticket, and the end comes with its card.
+  await vi.waitFor(() => expect(h.runtime.store.tickets.get(ticket.id)!.reviews).toHaveLength(1))
+  const round = h.runtime.store.tickets.get(ticket.id)!.reviews![0]!.round
+  await h.runtime.reviewers.reviewed(reviewerSessionId(ticket.id, round), { outcome: 'passed', summary: 'Checked the diff.' })
+  await h.runtime.idle()
   expect(notices().at(-1)).toMatchObject({ ticket_ended: { ticket_id: ticket.id, state: 'completed' } })
 })
 

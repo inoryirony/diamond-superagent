@@ -20,7 +20,9 @@ export function family<V, A extends unknown[] = [string]>(prefix: string, format
 
 export const KV = {
   /** Store: current database schema version. */
-  store: { schema: record<number>('schema') },
+  store: { schema: record<number>('schema'),
+    /** The board's newest change: each ticket save takes the next one, so a lane can tell what changed since its snapshot. */
+    board: record<number>('board-seq') },
   /** Settings: current revision, per-block revision, and saved settings snapshots (including the current one). */
   settings: { revision: record<number>('settings-revision'),
     block: family<number, [block: SettingsSave]>('settings-block-revision:'),
@@ -55,4 +57,26 @@ export const KV = {
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
+  /**
+   * DingTalk Source: known conversations with the peer's open DingTalk ID, whether they are direct and their name; per-conversation
+   * history cursor; per-conversation map from message ID to the root of its thread; the conversation's latest episode (its root
+   * message and the time of its last message, in milliseconds), which groups messages that follow one another closely; the messages
+   * still showing the "working on it" reaction; and the streaming card an acknowledgement opened, by conversation.
+   */
+  dingtalk: { chats: record<Record<string, { peerOpenId: string; direct: boolean; name: string }>>('dingtalk-chats'),
+    history: family<string, [conversation: string]>('dingtalk-history:'),
+    roots: family<Record<string, string>, [conversation: string]>('dingtalk-roots:'),
+    episodes: family<{ rootId: string; lastAt: number }, [conversation: string]>('dingtalk-episodes:'),
+    reactions: family<{ messageId: string; at: number }[], [conversation: string]>('dingtalk-reactions:'),
+    /** Directory contacts by the nick a message shows, as `dws contact user search` resolved them; `null` marks a nick that resolved to nobody. */
+    names: family<import('./sources/dingtalk-names.ts').ContactRecord, [nick: string]>('dingtalk-names:'),
+    /** The card an acknowledgement opened, with its text, waiting for the reply that finishes it. */
+    cards: record<Record<string, { bizId: string; text: string; at: number }>>('dingtalk-cards') },
+  /**
+   * Jira Source: the `updated` cursor of the issue search, and the Trigger IDs already ingested from each issue (bounded, oldest
+   * first) so a re-read of an unchanged issue or comment produces nothing.
+   */
+  jira: { cursor: record<string>('jira-cursor'), seen: family<string[], [issue: string]>('jira-seen:') },
+  /** GitLab Source: the `updated_after` cursor of the merge request search. */
+  gitlab: { cursor: record<string>('gitlab-cursor') },
 }

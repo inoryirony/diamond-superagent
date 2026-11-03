@@ -30,6 +30,8 @@ export const AssessmentSchema = z.object({
   intent_evidence: z.string().trim().min(1).max(700).nullish().describe('For acceptance: the quotes that establish the three facts.'),
   acknowledgement: AcknowledgementSchema.nullish().describe('For acceptance: one sentence in the source language, posted as a reply to the trigger; omit only when a matched rule asks for silence.'),
   reason: z.string().min(1).max(500),
+  ack_seq: z.number().int().nonnegative().nullish()
+    .describe('The board_seq a conflict returned, once you have read its changes and this decision is still right. Omit it otherwise.'),
 }).strict().refine(value => value.decision !== 'accept' || !directionAllowed(value.direction) || !value.rule_assessments.some(rule => rule.matched)
   || !!value.worktree_name, { message: 'Accepted work requires a short English worktree_name', path: ['worktree_name'] })
 
@@ -48,7 +50,7 @@ const NO_CONTEXT = 'This Source gives no Thread context; assess the Trigger\'s o
 /** Host dependencies used by `MasterAssessor`. */
 export interface AssessorHost {
   /** Active evaluations in `Engine` that the assessor reads and decides. */
-  readonly engine: Pick<EngineForMainSession, 'candidate' | 'candidateDelivered' | 'decide'>
+  readonly engine: Pick<EngineForMainSession, 'candidate' | 'candidateDelivered' | 'decide' | 'changedSince' | 'boardSeq'>
   readonly commands: Commands
   readonly deployment: Deployment
   /** Durable effect queue through which candidate assessments are delivered. */
@@ -58,8 +60,8 @@ export interface AssessorHost {
   paused(): boolean
   /** Thread context reader for `trigger`'s Source, or `undefined` when the Source has none. */
   threadContext(trigger: Trigger): TriggerContext | undefined
-  /** Delivers a candidate card to the main Session once per request ID, resolving after the Session receives it. */
-  deliver(requestId: string, text: string): Promise<void>
+  /** Delivers a candidate card to the Session that assesses `evalId` once per request ID, resolving after the Session receives it. */
+  deliver(evalId: string, requestId: string, text: string): Promise<void>
   candidateCard(candidate: Candidate): Promise<Record<string, unknown>>
 }
 
@@ -82,9 +84,9 @@ export const EvalReadSchema = z.object({
 export type EvalRead = z.infer<typeof EvalReadSchema>
 
 /**
- * Implements the `Engine` `Assessor` port for proactive candidate evaluation in the main Session.
- * Relays each evaluation's candidate card to the main Session through the durable `assessment` effect, serves bounded `TriggerContext` and repository reads while the evaluation runs, and converts the main Session's assessment into an `AssessmentOutcome` for `Engine.decide`.
- * Depends on `SourceRegistry` (via `AssessorHost`) for source-specific thread context and on `Sessions` for deduplicated candidate delivery; the main Session's `orchestrator_eval*` tools call `context`, `read`, and `decide`.
+ * Implements the `Engine` `Assessor` port for proactive candidate evaluation, one orchestrator Session per Eval.
+ * Relays each evaluation's candidate card to its Eval Session through the durable `assessment` effect, serves bounded `TriggerContext` and repository reads while the evaluation runs, and converts the Session's assessment into an `AssessmentOutcome` for `Engine.decide`.
+ * Depends on `SourceRegistry` (via `AssessorHost`) for source-specific thread context and on `Sessions` for deduplicated candidate delivery; the Eval Session's `orchestrator_eval*` tools call `context`, `read`, and `decide`.
  */
 export class MasterAssessor implements Assessor {
   /** Per-evaluation read caches and thread contexts, keyed by `evalId`. */
@@ -92,11 +94,11 @@ export class MasterAssessor implements Assessor {
   private readonly controller = new AbortController()
   /** Registers the handler that relays each Eval's candidate card, which a link lookup may delay for seconds. */
   constructor(private readonly host: AssessorHost) {
-    // Start the evaluation deadline only after the main Session receives the candidate card, so a busy Session does not consume evaluation time.
+    // Start the evaluation deadline only after the Eval's Session receives the candidate card, so creating a busy Session does not consume evaluation time.
     host.effects.handle('assessment', async ({ triggerId }, evalId) => {
       const candidate = this.host.engine.candidate(triggerId)
       if (candidate?.evalId !== evalId) return
-      await this.host.deliver(`candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) }))
+      await this.host.deliver(evalId, `candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) }))
       this.host.engine.candidateDelivered(evalId)
     }, { limit: () => host.paused() ? 0 : 4 })
   }
@@ -268,11 +270,23 @@ export class MasterAssessor implements Assessor {
       snapshots.set(cacheKey, body)
       return textPage(read.resource, body, read.offset, 4000)
   }
-  /** Converts the assessment into an outcome under current settings and passes it to `Engine.decide` for policy verification. */
-  async decide(triggerId: string, result: z.infer<typeof AssessmentSchema>, signal?: AbortSignal): Promise<{ state: string; ticket_id?: string; reason: string }> {
+  /**
+   * Converts the assessment into an outcome under current settings and passes it to `Engine.decide` for policy verification.
+   * An accept holds to the board the Session assessed: an open ticket that changed after `candidate.boardSeq`, and was not in
+   * the candidate, is returned as `conflict` instead of deciding, so two lanes do not open the same work twice.
+   */
+  async decide(triggerId: string, result: z.infer<typeof AssessmentSchema>, signal?: AbortSignal):
+    Promise<{ state: string; ticket_id?: string; reason: string; conflict?: { board_seq: number; changed: unknown[] } }> {
     const { candidate } = this.evalFor(triggerId)
     signal?.throwIfAborted()
     let outcome: AssessmentOutcome = assessmentOutcome(result, this.host.settings(), candidate.strength)
+    if (outcome.kind === 'accept') {
+      const known = new Set(candidate.tickets.map(ticket => ticket.id))
+      const since = result.ack_seq ?? candidate.boardSeq
+      const changed = this.host.engine.changedSince(since).filter(ticket => !known.has(ticket.id))
+      if (changed.length) return { state: 'conflict', reason: 'The board changed after this assessment; read these and decide again with ack_seq',
+        conflict: { board_seq: this.host.engine.boardSeq(), changed } }
+    }
     if (outcome.kind === 'accept' && outcome.acknowledgement) outcome = { ...outcome, acknowledgement: checkedImText(outcome.acknowledgement) }
     const decision = this.host.engine.decide(triggerId, { ...outcome, evalId: candidate.evalId })
     return { state: decision.kind, ...(decision.ticketId ? { ticket_id: decision.ticketId } : {}), reason: reasonText(decision.reason) }

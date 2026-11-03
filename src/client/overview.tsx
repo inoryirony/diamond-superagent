@@ -1,8 +1,9 @@
 /** Overview page: pending Tickets requiring human action, active system problems, 24-hour flow counts, and Executor load. */
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { usePoll, type Problem } from './api.ts'
-import { Button, Icon } from './controls.tsx'
+import { Button, DisclosureRow, Icon } from './controls.tsx'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
+import { blockingProblem } from '../setup.ts'
 import { setupPage, settingsRoute, type Route } from './route.ts'
 import { TicketLine } from './rows.tsx'
 import { healthText, localized, reasonLabel, valueLabel, readableMarkers } from './text.ts'
@@ -24,8 +25,9 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
   const raw = (text: string | undefined) => text && <p className="dt-error dt-clamp dt-mono">{text}</p>
   const worded = (text: string) => <p className="dt-error">{text}</p>
   switch (problem.kind) {
-    // A failed Feishu bot check pauses only the Feishu Source; other setup problems halt the entire service.
-    case 'setup': return row(t(problem.place === 'feishu' ? 'problemSetupFeishu' : 'problemSetup'), <p className="dt-error"><SetupMessage
+    // A failed Jira, GitLab, Feishu or DingTalk account check pauses only that Source; other setup problems halt the entire service.
+    case 'setup': return row(t(problem.place === 'feishu' ? 'problemSetupFeishu' : problem.place === 'dingtalk' ? 'problemSetupDingtalk'
+      : problem.place === 'jira' ? 'problemSetupJira' : problem.place === 'gitlab' ? 'problemSetupGitlab' : 'problemSetup'), <p className="dt-error"><SetupMessage
       problem={problem} /></p>,
       setupPage(problem.place), t(`problemSetupFix.${problem.place}`), <CheckSetupButton />)
     case 'no-source': return row(t('problemNoSource'), undefined, settingsRoute('source'), undefined, go(t('actionOpenSources'),
@@ -62,6 +64,8 @@ export function OverviewPage() {
   const { t, call, navigate } = usePanel()
   const { setup } = usePanelData()
   const { data, error, reload } = usePoll(() => call('GET overview'), [])
+  // The machine's own numbers stay folded away unless a person opens them.
+  const [advanced, setAdvanced] = useState(false)
   if (!data) return <LoadState error={error} loading />
   const stat = (label: string, value: ReactNode, route?: Route) => <span className="dt-stat">
     <span className="dt-stat-label">{label}</span>
@@ -70,34 +74,56 @@ export function OverviewPage() {
   </span>
   const more = (route: Route) => <button type="button" className="dt-textlink dt-more-link"
     onClick={() => navigate(route)}>{t('details')}</button>
+  const board = (title: string, tickets: (typeof data.person), empty: string, question = false) => <Section title={title}
+    count={tickets.length}>
+    {tickets.length ? <ul className="dt-list dt-cards">{tickets.map(ticket => <TicketLine key={ticket.id} ticket={ticket}
+      question={question} onChanged={reload} />)}</ul> : <Hint>{empty}</Hint>}
+  </Section>
+  // The board answers what a person opens the panel for: what needs them, what the Executor is doing, and what just finished.
+  // Everything about how the machine runs, problems, counts and the engine's own pages, sits behind one disclosure below it.
   return <>
     {error && <LoadState error={error} loading={false} />}
-    <Section title={t('pendingTickets')} count={data.person.length}>
-      {data.person.length ? <ul className="dt-list dt-cards">{data.person.map(ticket => <TicketLine key={ticket.id} ticket={ticket} question
-        onChanged={reload} />)}</ul>
-        : <Hint>{t('needsYouNone')}</Hint>}
-    </Section>
-    {data.problems.length > 0 && <Section title={t('problems')} count={data.problems.length}>
-      <ul className="dt-list dt-cards">{data.problems.map((problem, index) => <ProblemLine key={index} problem={problem}
-        onChanged={reload} />)}</ul>
-    </Section>}
-    <Section title={t('lastDay')} action={more({ page: 'trigger', query: { filter: 'recent' } })}>
-      {/* Received and evaluated counts operate on Triggers rather than Threads or Decisions, so they do not link to filtered views. */}
-      <div className="dt-stats">
-        {stat(t('flowReceivedLabel'), data.flow.received)}
-        {stat(t('flowFilteredLabel'), data.flow.filtered, data.flow.filtered ? { page: 'source' } : undefined)}
-        {stat(t('flowJudgedLabel'), data.flow.judged)}
-        {stat(t('flowAcceptedLabel'), data.flow.accepted, { page: 'eval', query: { window: '24h' } })}
-        {data.flow.dropped > 0 && stat(t('flowDroppedLabel'), data.flow.dropped, { page: 'source' })}
-      </div>
-    </Section>
-    <Section title={t('term.executor')} action={more({ page: 'execution' })}>
-      {/* Pauses surface in `problems` above, so Executor counts render the same in both states; while setup waits, nothing runs. */}
-      {setup?.problem ? <Hint>{t('executorWaitingSetup')}</Hint> : <div className="dt-stats">
-        {stat(t('executingLabel'), `${data.executor.running} / ${data.executor.maxWorkers}`)}
-        {stat(t('queuedLabel'), data.executor.queued)}
-        {stat(t('idleLabel'), data.executor.idle)}
-      </div>}
-    </Section>
+    <BoardSummary needsYou={data.needsYou} working={data.working.length} finished={data.ended.length} problems={data.problems.length}
+      onProblems={() => setAdvanced(true)} />
+    {board(t('needsYou'), data.person, t('emptyNeedsYou'), true)}
+    {board(t('inProgress'), data.working, t('emptyInProgress'))}
+    {board(t('recentlyDone'), data.ended, t('emptyRecentlyDone'))}
+    <DisclosureRow icon={<Icon name="settings" />} title={t('advanceHint')} open={advanced} onToggle={() => setAdvanced(!advanced)}
+      collapsedContent={<span className="dt-hint">{t('systemProblems', { count: data.problems.length })}</span>}>
+      {data.problems.length > 0 && <Section title={t('problems')} count={data.problems.length}>
+        <ul className="dt-list dt-cards">{data.problems.map((problem, index) => <ProblemLine key={index} problem={problem}
+          onChanged={reload} />)}</ul>
+      </Section>}
+      <Section title={t('lastDay')} action={more({ page: 'trigger', query: { filter: 'recent' } })}>
+        {/* Received and evaluated counts operate on Triggers rather than Threads or Decisions, so they do not link to filtered views. */}
+        <div className="dt-stats">
+          {stat(t('flowReceivedLabel'), data.flow.received)}
+          {stat(t('flowFilteredLabel'), data.flow.filtered, data.flow.filtered ? { page: 'source' } : undefined)}
+          {stat(t('flowJudgedLabel'), data.flow.judged)}
+          {stat(t('flowAcceptedLabel'), data.flow.accepted, { page: 'eval', query: { window: '24h' } })}
+          {data.flow.dropped > 0 && stat(t('flowDroppedLabel'), data.flow.dropped, { page: 'source' })}
+        </div>
+      </Section>
+      <Section title={t('term.executor')} action={more({ page: 'execution' })}>
+        {/* Pauses surface in `problems` above, so Executor counts render the same in both states; while setup waits, nothing runs. */}
+        {blockingProblem(setup?.problems ?? []) ? <Hint>{t('executorWaitingSetup')}</Hint> : <div className="dt-stats">
+          {stat(t('executingLabel'), `${data.executor.running} / ${data.executor.maxWorkers}`)}
+          {stat(t('queuedLabel'), data.executor.queued)}
+          {stat(t('idleLabel'), data.executor.idle)}
+        </div>}
+      </Section>
+    </DisclosureRow>
   </>
+}
+/** The one line a person reads first: what needs them, what runs, what finished, and how many problems the machine reports. */
+function BoardSummary({ needsYou, working, finished, problems, onProblems }: { needsYou: number; working: number; finished: number
+  problems: number; onProblems: () => void }) {
+  const { t } = usePanel()
+  return <div className="dt-board-summary">
+    <span className="dt-board-count">{t('needsYou')} <b>{needsYou}</b></span>
+    <span className="dt-board-count">{t('inProgress')} <b>{working}</b></span>
+    <span className="dt-board-count">{t('recentlyDone')} <b>{finished}</b></span>
+    {problems > 0 && <button type="button" className="dt-textlink dt-board-problems" onClick={onProblems}>{t('systemProblems',
+      { count: problems })}</button>}
+  </div>
 }

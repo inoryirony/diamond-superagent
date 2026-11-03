@@ -68,18 +68,23 @@ export interface FollowupRecords {
 /**
  * The tickets whose worker decides a person's follow-up: those it reached on their own Threads that can still decide it
  * and did not hand it back. A ticket can while it is live, also once a person dropped its Subscription to the Thread, and
- * while it is ended, not by a person, with the Trigger waiting to resume it. None once a person sent it to Eval, or while
- * an Eval holds it, which an earlier version may have queued. While a ticket owns it, the message goes to no Eval, and the
- * main Session may only stop the work on it.
+ * while it is ended, not by a person, with the Trigger waiting to resume it. None once a person sent it to Eval, or, unless
+ * `underEval` says otherwise, while an Eval holds it. While a ticket owns it, the message goes to no Eval, and the main
+ * Session may only stop the work on it.
+ *
+ * `underEval` is for the main Session, which now reads every person's message as a candidate even while a ticket's worker
+ * decides it: the owner still decides, and the candidate exists only for the Session to read, ignore, or stop.
  */
-export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads'>, records: FollowupRecords): string[] {
+export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads'>, records: FollowupRecords,
+  options: { underEval?: boolean } = {}): string[] {
   if (!trigger.human) return []
   const disposition = records.triggers.disposition(trigger.id)
   if (!disposition || disposition.requeued) return []
   // The disposition alone rules most messages out, so a Thread or a ticket is read only for one that may have an owner.
   const returned = new Set(disposition.handbacks?.map(item => item.ticketId))
   const reached = disposition.fanout.filter(id => !returned.has(id) && !disposition.context?.includes(id))
-  if (!reached.length || records.threads.get(threadKey(trigger.threads[0]!))?.evaluating?.triggerIds.includes(trigger.id)) return []
+  if (!reached.length) return []
+  if (!options.underEval && records.threads.get(threadKey(trigger.threads[0]!))?.evaluating?.triggerIds.includes(trigger.id)) return []
   return reached.filter(id => {
     const ticket = records.tickets.get(id)
     return !!ticket && (liveTicket(ticket) || (ticket.ended?.by !== 'human'
@@ -214,6 +219,12 @@ export type AssignmentState = 'pending' | 'running' | 'ended'
  * ready (`ready`), a person must act to unblock or recover it (`blocked` or `failed`), or nothing is left to do (`dropped`).
  */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
+/** One report in an Assignment's ledger, with its author: the worker, or the host when it closed a turn on the worker's behalf. */
+export interface ReportEntry { by: 'worker' | 'host'; state: ReportState; summary: string; at: string
+  /** What a ready report showed: the commands run, queries made or files read after the last change, and what each printed. */
+  evidence?: ReportEvidence[] }
+/** One check a report names as evidence: what was done, and what it actually showed. */
+export interface ReportEvidence { what: string; result: string }
 /** Binding between a ticket and one executor instance. */
 export interface Assignment {
   id: string
@@ -223,6 +234,10 @@ export interface Assignment {
   endedAt?: string
   endedReason?: string
   report?: { state: ReportState; summary: string; at: string }
+  /** Every report in order, with its author; `report` mirrors the last. An Assignment written before the ledger has none (see `reportHistory`). */
+  reports?: ReportEntry[]
+  /** When the host last asked this stalled worker for its status (see `stalledSince`); it asks again only once the worker has been active since. */
+  probedAt?: string
   /** When Inputs last reached the worker; one at or after `report.at` means the worker has been busy with Inputs since that report. */
   deliveredAt?: string
   /**
@@ -230,6 +245,12 @@ export interface Assignment {
    * into a step before, the worker read.
    */
   idleAt?: string
+  /**
+   * Set when a review returned this Assignment's predecessor: the worker revises the same work, so the new Assignment
+   * continues the attempt that was under review and its review rounds carry on. Unset on an Assignment a person's follow-up,
+   * a retry or the orchestrator started, which begins a new attempt with its own rounds.
+   */
+  revises?: true
 }
 
 export type TicketInput =
@@ -273,6 +294,30 @@ export type TicketEndBy = 'executor' | 'human'
 export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'stopped'
 /** A question for a person; `triggerId` is the human message that raised it, whose conversation it goes back to. */
 export interface Attention { id: string; question: string; triggerId?: string }
+/**
+ * A hold on a ticket: two conversations gave it opposite directions and neither is plainly right, so it parks until someone
+ * settles which stands. It locks only the messages in dispute (`inputs`), not the ticket: work the conflict does not touch
+ * carries on. The question names both directions with who gave each; `options` are the directions a release may choose from.
+ */
+export interface Hold {
+  id: string
+  /** What conflicts, naming both directions and the person who gave each, each quoting the message it came from. */
+  question: string
+  /** The directions a release may settle on, most likely first; a release names one or says which it stands for. */
+  options?: { id: string; text: string; by: string }[]
+  /** The message that raised the conflict, so a reader can open it. */
+  triggerId?: string
+  /** The Thread the conflict came from, when its message is not enough to place it. */
+  thread?: string
+  /** The inputs it locks: they wait, and the rest of the ticket does not. Empty while a conflict names only the ticket itself. */
+  inputs: string[]
+  at: string
+  /** When a person was last asked to settle it, and when a reminder is due, so a silent conflict cannot become a quiet stop. */
+  dueAt?: string
+  remindedAt?: string
+  /** How it was settled, once it was; a held ticket has none. */
+  released?: { at: string; resolution: string; by: 'person' | 'orchestrator'; triggerId?: string; option?: string }
+}
 /** Ticket aggregate: an authorized work item with its assignments, channels, thread bindings, and inputs. */
 export interface Ticket {
   id: string
@@ -285,6 +330,8 @@ export interface Ticket {
   ended?: { at: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
   /** Open question for a person; cleared by the executor or when the ticket ends. */
   attention?: Attention
+  /** A conflict parked until someone settles which direction stands (see `Hold`); none on an unheld ticket. */
+  hold?: Hold
   assignments: Assignment[]
   inputs: TicketInput[]
   /** Inputs not yet handed to a running assignment. */
@@ -305,6 +352,28 @@ export interface Ticket {
   execution?: Execution
   /** The latest failed delivery of an Input to its worker, until a delivery succeeds. */
   delivery?: { error: string; at: string }
+  /**
+   * Reviews of its results, in order. A ready report does not end a ticket whose executor reviews results: it asks for a review
+   * of that result, which passes it towards delivery or returns it to the worker with findings. Only a review that passes the
+   * result, or a worker's `dropped` report, finishes the ticket.
+   */
+  reviews?: TicketReview[]
+  /** Set when a ready result ended the ticket although reviews are on and its rounds were spent, so no review judged it. */
+  unreviewed?: true
+}
+
+/** How a review of a ticket's result ended: the work passed it, or it sent the work back with findings. */
+export type ReviewOutcome = 'passed' | 'returned'
+/** What one review of a ticket's result found. */
+export interface TicketReview {
+  /** The Assignment whose result it reviews, the round it is (1 is the first review of the ticket), and when it was asked for. */
+  assignmentId: string
+  round: number
+  at: string
+  /** When it ended, how and why, with what the review found; empty while it runs. */
+  ended?: { at: string; outcome: ReviewOutcome; summary: string; findings?: string[]
+    /** The review could not judge the result, which waits for a person. */
+    unfinished?: true }
 }
 /**
  * A Thread a ticket follows, by its key: `own` when the ticket opened it, such as its own pull request, and when and how it
@@ -319,6 +388,45 @@ export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.en
 /** How a ticket ended. */
 export const ticketOutcome = (ticket: Pick<Ticket, 'ended'>): TicketOutcome | undefined => ticket.ended?.outcome
 export const runningAssignment = (ticket: Ticket): Assignment | undefined => ticket.assignments.find(assignment => assignment.state === 'running')
+/** The review of a ticket's result still running, if any: its newest review without an end. */
+export const pendingReview = (ticket: Pick<Ticket, 'reviews'>): TicketReview | undefined =>
+  ticket.reviews?.findLast(review => !review.ended)
+/**
+ * Whether a ready report of an Assignment asks for a review, or is the result itself: with reviews on, every ready result is
+ * reviewed once, and a returned one again until it runs out of rounds; with reviews off, the result is the ticket's.
+ *
+ * The rounds bound one attempt at the work, not the ticket's whole life. They count the reviews since the current Assignment
+ * started, because a new Assignment is a new attempt: a person's follow-up, a retry, or the orchestrator acting on what the
+ * reviewer kept finding each begin one. Counting every review the ticket ever had made those restart paths pointless — the
+ * worker would revise, report ready, and no review would run because an earlier attempt had already spent the budget.
+ */
+export const reviewRequired = (ticket: Pick<Ticket, 'reviews' | 'assignments'>, reviews: boolean, rounds: number): boolean => {
+  if (!reviews) return false
+  const report = latestReport(ticket)
+  if (!report) return false
+  // A review already asked for by this exact result runs or ran: `>=` because a review recorded in the same millisecond as
+  // the report is a review of that report, not one that predates it.
+  const reviewed = (ticket.reviews ?? []).some(review => review.at >= report.at)
+  return !reviewed && reviewsInAttempt(ticket) < rounds
+}
+/** The Assignment the ticket is on now: the newest one, whose result a review of the current work judges. */
+const currentAssignment = (ticket: Pick<Ticket, 'assignments'>): Assignment | undefined => ticket.assignments.at(-1)
+/**
+ * How many reviews with a verdict the current attempt has taken: one that ended unfinished, because its Session could not run or
+ * a newer result superseded it, judged nothing and spends no round. An attempt begins at the newest Assignment a person, a retry or the
+ * orchestrator started, and every Assignment after it that only revises the same work belongs to it.
+ */
+export const reviewsInAttempt = (ticket: Pick<Ticket, 'reviews' | 'assignments'>): number => {
+  const assignments = ticket.assignments
+  let start = assignments.length - 1
+  while (start > 0 && assignments[start]?.revises) start--
+  const attemptIds = new Set(assignments.slice(Math.max(start, 0)).map(assignment => assignment.id))
+  return (ticket.reviews ?? []).filter(review => attemptIds.has(review.assignmentId) && !!review.ended && !review.ended.unfinished
+    && (review.ended.outcome === 'passed' || review.ended.outcome === 'returned')).length
+}
+/** The review round a new review of the ticket's latest result is: one more than every review the ticket has had, so a round
+ * number never repeats and the Reviewer Session id built from it stays unique across attempts. */
+export const reviewRound = (ticket: Pick<Ticket, 'reviews'>): number => (ticket.reviews?.length ?? 0) + 1
 /**
  * Whether a Trigger reached a ticket: it started the ticket, came to it as an Input, or is on a Thread the ticket subscribes
  * to; with `context` false, not a Thread the ticket follows only for context, where its worker may read but not write.
@@ -344,10 +452,28 @@ export function readUntil(ticket: Pick<Ticket, 'assignments'>, progress = true):
 }
 /**
  * Whether a ticket waits for a person: its latest Assignment reported blocked or failed, and no person's message reached it
- * since. A later report that is neither, a person's message, or a retry, which starts a new Assignment, lifts it.
+ * since. A later report that is neither, a person's message, or a retry, which starts a new Assignment, lifts it. A hold is
+ * not this wait: it locks the inputs it names, and the rest of the ticket carries on (see `holdsInput`).
  */
 export function waitsForPerson(ticket: Ticket): boolean {
   const report = latestAssignment(ticket)?.report
   if (report?.state !== 'blocked' && report?.state !== 'failed') return false
   return !ticket.inputs.some(input => input.kind === 'trigger' && input.human && !input.context && input.at > report.at)
+}
+/** Whether an open hold locks `input`: a message in dispute waits for someone to settle it, and others do not. */
+export const holdsInput = (ticket: Pick<Ticket, 'hold'>, input: { id: string }): boolean =>
+  !!ticket.hold && !ticket.hold.released && (ticket.hold.inputs.includes(input.id) || ticket.hold.inputs.length === 0)
+/** The reports of an Assignment in order: its ledger, or, for one written before the ledger, the one report it kept, which a worker wrote. */
+export const reportHistory = (assignment: Assignment): ReportEntry[] =>
+  assignment.reports ?? (assignment.report ? [{ by: 'worker', ...assignment.report }] : [])
+/** How long a running worker may say nothing, or only `waiting`, before the host asks it for its status, and again before it tells the main Session. */
+export const STALL_MS = 20 * 60_000
+/** Where a running Assignment's silence is counted from: the newest sign of life the host recorded for it. */
+export const stallAnchor = (assignment: Assignment): string =>
+  assignment.idleAt ?? assignment.report?.at ?? assignment.deliveredAt ?? assignment.startedAt ?? assignment.createdAt
+/** The anchor of a running Assignment that has been silent past `STALL_MS` at `now` (no report yet, or `waiting`); undefined while it is not stalled. */
+export function stalledSince(assignment: Assignment, now: string): string | undefined {
+  if (assignment.report && assignment.report.state !== 'waiting') return undefined
+  const anchor = stallAnchor(assignment)
+  return Date.parse(anchor) < Date.parse(now) - STALL_MS ? anchor : undefined
 }

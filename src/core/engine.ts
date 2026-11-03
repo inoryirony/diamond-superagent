@@ -1,13 +1,14 @@
 /** The domain Engine: the single entry point of the core, and the role interfaces its callers receive. */
 import { UserError } from './errors.ts'
-import { isoTime, liveTicket } from './model.ts'
-import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, Trigger } from './model.ts'
-import type { Candidate, Repositories } from './ports.ts'
+import { isoTime, latestAssignment, liveTicket, runningAssignment } from './model.ts'
+import type { ChannelRef, Decision, PolicyEffect, ReportEntry, ThreadRef, Ticket, Trigger } from './model.ts'
+import type { Candidate, Repositories, ReviewReport, ReviewerPort } from './ports.ts'
 import type { EngineOptions } from './part.ts'
 import { Assignments, type WorkerReport } from './assignments.ts'
 import { Evals, type Outcome } from './evals.ts'
 import { Intake, type ReceiveResult } from './intake.ts'
 import { Replies, type Reply, type ReplyRequest } from './replies.ts'
+import { Reviews } from './reviews.ts'
 import { Tickets } from './tickets.ts'
 
 export type { EngineOptions } from './part.ts'
@@ -28,11 +29,15 @@ export class Engine {
   private readonly assignments: Assignments
   private readonly evals: Evals
   private readonly intake: Intake
+  private readonly reviews: Reviews
   constructor(private readonly options: EngineOptions) {
     this.repo = options.repo
     this.replies = new Replies(options)
     this.tickets = new Tickets(options, this.replies)
     this.assignments = new Assignments(options, this.tickets, this.replies)
+    this.reviews = new Reviews(options, options.reviewer ?? ABSENT_REVIEWER, this.tickets)
+    this.tickets.use(this.reviews)
+    this.assignments.use(this.reviews)
     this.evals = new Evals(options, this.tickets)
     this.intake = new Intake(options, this.tickets)
   }
@@ -81,6 +86,15 @@ export class Engine {
     }
     for (const thread of this.repo.threads.active()) {
       if (thread.pending.length && !thread.evaluating) this.repo.atomic(() => { this.evals.start(thread.key, policy) })
+    }
+    // A running worker silent past STALL_MS is asked for its status once, and the main Session hears of it if it stays silent (see `Tickets.stall`).
+    const now = this.options.now?.() ?? new Date().toISOString()
+    for (const ticket of this.repo.tickets.active()) {
+      if (liveTicket(ticket) && runningAssignment(ticket)) this.repo.atomic(() => { this.tickets.stall(ticket.id, now) })
+    }
+    // A hold nobody settled by its due time is asked about again, so a wait on people cannot turn into a quiet stop.
+    for (const ticket of this.repo.tickets.open()) {
+      if (ticket.hold && !ticket.hold.released && ticket.hold.dueAt && ticket.hold.dueAt <= now) this.repo.atomic(() => { this.tickets.holdDue(ticket.id, now) })
     }
   }
 
@@ -164,6 +178,14 @@ export class Engine {
    * @throws UserError when the ticket is unknown, has ended, or is not retryable.
    */
   retryTicket(ticketId: string): Ticket { return this.repo.atomic(() => this.tickets.retry(ticketId)) }
+  /**
+   * Starts a fresh assignment on a live ticket with `instruction` as its first input, for the main Session to act on a
+   * result whose review rounds are spent: the work continues under a narrower instruction instead of waiting for a person.
+   * @throws UserError when the ticket is unknown, ended, or has a review still running.
+   */
+  restartTicket(ticketId: string, instruction: string): Ticket {
+    return this.repo.atomic(() => this.tickets.restartReviewSpent(ticketId, instruction))
+  }
 
   // The Executor
 
@@ -220,6 +242,33 @@ export class Engine {
    */
   note(ticketId: string, text: string): Ticket { return this.repo.atomic(() => this.tickets.note(ticketId, text)) }
   /**
+   * Park the inputs a conflict is about until someone settles which direction stands: see `Tickets.hold`. The rest of the
+   * ticket keeps working.
+   * @throws UserError when the ticket is unknown or ended.
+   */
+  hold(ticketId: string, hold: Parameters<Tickets['hold']>[1]): Ticket {
+    return this.repo.atomic(() => this.tickets.hold(ticketId, hold))
+  }
+  /**
+   * Settle a held ticket with the direction that stands, delivered ahead of what waited: see `Tickets.release`. Wakes a
+   * worker whose turn ended, so it takes the settlement up.
+   * @throws UserError when the ticket is unknown or not held.
+   */
+  release(ticketId: string, resolution: string, by: 'person' | 'orchestrator', option?: string, triggerId?: string): Ticket {
+    return this.repo.atomic(() => {
+      const ticket = this.tickets.release(ticketId, resolution, by, option, triggerId)
+      if (!runningAssignment(ticket) && latestAssignment(ticket)?.state === 'ended') this.tickets.wake(ticketId)
+      return this.repo.tickets.get(ticketId)!
+    })
+  }
+  /** The board's newest change: a lane reads it with the candidate, and holds its decisions to it (`see changedSince`). */
+  boardSeq(): number { return this.repo.tickets.boardSeq() }
+  /**
+   * The open tickets that changed after `since`: a lane that assessed at `since` reads them before accepting new work, so two
+   * lanes never open the same ticket twice.
+   */
+  changedSince(since: number): Ticket[] { return this.repo.tickets.changedSince(since).map(item => item.ticket) }
+  /**
    * An Executor's hand-back of a message that reached its ticket but asks for more than it: see `Evals.handback`.
    * @returns whether it was queued for Eval: false while another ticket still decides it, and for one this ticket did not decide (see `Evals.handback`).
    * @throws UserError when the ticket or trigger is unknown, the trigger did not reach the ticket, or the ticket already handed it back.
@@ -236,7 +285,9 @@ export class Engine {
    * @throws UserError for an unknown or ended ticket, an ended assignment, a question that comes with a ready result or an
    * answer, or a question or answer that names a message that is not a person's or did not reach the ticket.
    */
-  report(ticketId: string, report: WorkerReport): Ticket { return this.repo.atomic(() => this.assignments.report(ticketId, report)) }
+  report(ticketId: string, report: WorkerReport, options?: { by?: ReportEntry['by'] }): Ticket {
+    return this.repo.atomic(() => this.assignments.report(ticketId, report, options))
+  }
   /**
    * Handles an assignment that was running when the host stopped: restarts it with a recovery note unless its latest report is
    * `waiting`, `ready`, `blocked`, or `failed` and no Input reached its worker after that report, in which case it keeps its
@@ -245,6 +296,16 @@ export class Engine {
   assignmentInterrupted(ticketId: string, assignmentId: string): void {
     this.repo.atomic(() => { this.assignments.interrupted(ticketId, assignmentId) })
   }
+
+  // Reviews
+
+  /**
+   * The Reviewer's verdict on the result under review: a pass delivers the result as the worker's ready report would have and
+   * ends the ticket when its work is done; a return sends the findings back to the worker, which revises the same work, until
+   * the rounds are spent and the result waits for a person.
+   * @throws UserError when the ticket is unknown or ended, or has no review running.
+   */
+  reviewEnded(ticketId: string, report: ReviewReport): Ticket { return this.repo.atomic(() => this.reviews.end(ticketId, report)) }
 
   // Settings
 
@@ -260,11 +321,20 @@ export class Engine {
 /** What Sources ask and tell the Engine. */
 export type EngineForSources = Pick<Engine, 'receive' | 'bindThread' | 'threadClosed'>
 /** What the main Session asks of the Engine. */
-export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'>
+export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'
+  | 'hold' | 'release' | 'changedSince' | 'boardSeq'>
 /** What people ask of the Engine, through the panel or the main Session. */
-export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
+export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'restartTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
 /** What Settings tells the Engine. */
 export type EngineForSettings = Pick<Engine, 'policyChanged'>
+/**
+ * What the Reviewer tells the Engine, and what it reads: the ticket it reviews and every ticket of its thread, so a result
+ * never judged twice reads what it needs through `orchestrator_read`.
+ */
+export type EngineForReviewer = Pick<Engine, 'reviewEnded'>
 /** What the Executor tells the Engine, and what its workers ask of it. */
 export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed'
   | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply'>
+
+/** The Reviewer the Engine runs with when its host has none, which never reviews: results are the ticket's, as without reviews. */
+const ABSENT_REVIEWER: ReviewerPort = { review: () => { throw new UserError('noReviewer') }, stopReview: () => {} }

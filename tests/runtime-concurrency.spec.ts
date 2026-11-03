@@ -99,6 +99,7 @@ it('runs prepare commands in the background, side by side, while accepts, intake
   const later = feishu('3', '@bot 修三')
   expect(h.runtime.receive(later)).toBe('stored')
   await h.runtime.pump()
+  await waitUntil(() => h.candidates().length === 3)
   expect(h.candidates()).toEqual([...first, later].map(trigger => trigger.id))
   prepare.resolve()
   await h.runtime.idle()
@@ -633,6 +634,8 @@ describe('what a worker read', () => {
   async function completed() {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
     await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done' }); await h.runtime.idle()
+    // The ready result waits in a review of its own; passing it ends the ticket, whose message then resumes it.
+    await h.finishReview(one.ticket.id)
     idle(one.sessionId)
     await later()
     return { one, thanks: feishu('2', '@bot 谢谢', { root_id: 'om_1' }), ticket: () => h.runtime.store.tickets.get(one.ticket.id)! }
@@ -727,7 +730,8 @@ describe('what a worker read', () => {
     await later()
     await h.runTool(one.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'Nothing to do' })
     await h.runtime.pump(); await h.runtime.idle()
-    expect(h.candidates()).not.toContain(thanks.id)
+    // The main Session reads the message's own candidate now, whatever the worker did with it.
+    expect(h.candidates()).toContain(thanks.id)
   })
   it('counts a message a retry delivered to its idle worker as read by the report of the turn it woke', async () => {
     const { one, thanks, ticket } = await completed()
@@ -742,7 +746,7 @@ describe('what a worker read', () => {
       vi.setSystemTime(Date.now() + 1000)
       await h.runTool(one.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'Nothing to do' })
     })
-    expect(h.candidates()).not.toContain(thanks.id)
+    expect(h.candidates()).toContain(thanks.id)
   })
   it('sends to Eval at a merge a message that reached the worker after its last step, which no step took before its turn ended', async () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
@@ -818,6 +822,8 @@ it('resumes an ended ticket a person wrote to during a pause once it lifts, unde
   const ended = async (id: string) => {
     const { ticket, sessionId } = await h.acceptedTicket(feishu(id, `@bot 修${id}`, { root_id: `om_${id}` }))
     await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
+    // The ready result waits in a review of its own; passing it is what ends the ticket.
+    await h.finishReview(ticket.id)
     return ticket.id
   }
   const first = await ended('1'), second = await ended('3')

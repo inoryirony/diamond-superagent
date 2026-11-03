@@ -22,8 +22,27 @@ import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubag
 const now = (): string => new Date().toISOString()
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
 export const workerSessionId = (ticketId: string): string => `worker-${ticketId}`
-/** Returns the ticket ID for a worker session ID (`worker-<ticketId>`), or undefined for non-worker sessions. */
-export const ticketOfSession = (sessionId: string): string | undefined => sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
+/**
+ * Returns the reviewer session ID of review `round` of a ticket (`reviewer-<ticketId>-<round>`): each review gets a Session of
+ * its own, so a later round reads the result afresh instead of the reasoning of the round before.
+ */
+export const reviewerSessionId = (ticketId: string, round: number): string => `reviewer-${ticketId}-${round}`
+/** Returns the ticket ID for a worker or reviewer session ID, or undefined for non-ticket sessions. */
+export const ticketOfSession = (sessionId: string): string | undefined => {
+  if (sessionId.startsWith('worker-')) return sessionId.slice('worker-'.length)
+  const match = /^reviewer-(.+)-(\d+)$/.exec(sessionId)
+  return match ? match[1] : undefined
+}
+/** Returns the review round of a reviewer session ID, or undefined for any other session. */
+export const roundOfSession = (sessionId: string): number | undefined => {
+  const match = /^reviewer-(.+)-(\d+)$/.exec(sessionId)
+  return match ? Number(match[2]) : undefined
+}
+/** Whether a session ID names a Reviewer Session. */
+export const isReviewerSession = (sessionId: string): boolean => sessionId.startsWith('reviewer-')
+/** A short Session title for a review of a ticket's result: the round and the ticket's title. */
+export const reviewTitle = (ticket: Pick<Ticket, 'title'>, round: number): string =>
+  `review ${round} ${ticket.title.replace(/\s+/g, ' ').slice(0, 40)}`
 /** Maximum runtime for a workspace prepare command. */
 const PREPARE_TIMEOUT_MS = 10 * 60_000
 /** Maximum transient retry attempts for a launch or worker turn, and the initial backoff before resuming a turn. */
@@ -59,7 +78,7 @@ const ticketWorktreeName = (name: string, id: string): string => `${WorktreeName
 export interface ExecutorHost {
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
   readonly context: Context
-  /** Where the Executor reports what happened to Assignments and Inputs. */
+  /** Where the Executor and its reviewers report what happened to Assignments, reviews and Inputs. */
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted'>
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
@@ -118,13 +137,18 @@ const capped = (text: string, limit: number, read: string) =>
  * Formats a Trigger for worker delivery: author, thread, timestamp, text up to `TRIGGER_CHARS`, source message link,
  * optional routing note, and a preview of the replied-to message when the worker has not yet seen it.
  */
+/** The sender's identity a trigger carries for the model: the display name the Source resolved (花名（真名） on DingTalk), and
+ * whether he is the operator himself, whose message carries his own authority rather than a request from someone else. */
+export const actorFace = (trigger: Trigger) => ({ ...(typeof trigger.meta.actor_name === 'string' ? { from_name: trigger.meta.actor_name } : {}),
+  ...(trigger.meta.operator === true ? { operator: true } : {}) })
+
 export function triggerMessage(trigger: Trigger, link: { source_url?: string; source_url_read?: string }, note?: string, repliesTo?: Trigger) {
-  return { trigger_id: trigger.id, from: trigger.actor.id, thread: threadKey(trigger.threads[0]!), at: trigger.at,
+  return { trigger_id: trigger.id, from: trigger.actor.id, ...actorFace(trigger), thread: threadKey(trigger.threads[0]!), at: trigger.at,
     ...capped(trigger.text, TRIGGER_CHARS, `trigger/${trigger.id}`), ...link, ...(note ? { routing_note: note } : {}),
     ...(repliesTo ? { replies_to: { trigger_id: repliesTo.id, preview: repliesTo.text.replace(/\s+/g, ' ').slice(0, 160) } } : {}) }
 }
 /** Formats a peer trigger from the ticket's acceptance batch with author, timestamp, 160-character preview, and read resource path. */
-export const batchLine = (trigger: Trigger) => ({ trigger_id: trigger.id, from: trigger.actor.id, at: trigger.at,
+export const batchLine = (trigger: Trigger) => ({ trigger_id: trigger.id, from: trigger.actor.id, ...actorFace(trigger), at: trigger.at,
   preview: trigger.text.replace(/\s+/g, ' ').slice(0, 160), read: `trigger/${trigger.id}` })
 /** Returns the other triggers in a ticket's origin batch (excluding the primary `origin.triggerId`), oldest first. */
 export const batchOf = (host: { store: Pick<Store, 'triggers'> }, ticket: Ticket): Trigger[] => ticket.origin.triggerIds
@@ -233,7 +257,13 @@ export class DshExecutor implements Executor {
       retry: [5000, 300_000] })
     // Failed input deliveries are recorded on the ticket itself rather than reported through the `delivery` effect health entry (`quiet: true`).
     host.effects.handle('delivery', payload => this.deliverQueued(payload.ticketId), { limit: () => host.paused() ? 0 : 4, quiet: true })
+    // A review runs beside the workers rather than in their slots: it reads and runs checks, and never holds a launch back.
   }
+  /**
+   * Whether results are reviewed before the ticket delivers or ends them, which the host sets from the executor settings;
+   * read at each ready report, so switching the phase needs no restart.
+   */
+  reviews: () => boolean = () => false
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
     return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }
@@ -368,6 +398,18 @@ export class DshExecutor implements Executor {
       this.left.get(ticket.id)?.collect.abort(); this.left.delete(ticket.id); this.personal.delete(ticket.id)
     })
   }
+  /**
+   * A review sent the result back: the worker's turn of that assignment ends, with the input the next assignment carries, so
+   * the revision starts from the findings rather than continuing beside them.
+   */
+  returned(ticket: Ticket, assignment: Assignment, reason: string): void {
+    this.transient.delete(assignment.id)
+    const sessionId = workerSessionId(ticket.id)
+    this.host.store.afterCommit(() => {
+      this.host.context.agents.get(sessionId as SessionId)?.cancel({ kind: 'user' }, { keepInbox: false })
+      this.stopWork(ticket.id, reason)
+    })
+  }
   /** Stop what a ticket's worker runs in the background (see `stopBackground`). */
   private stopWork(ticketId: string, reason: string, keepInbox = false): void {
     this.track(ticketId, stopBackground(this.host.context, workerSessionId(ticketId), reason, keepInbox))
@@ -416,7 +458,7 @@ export class DshExecutor implements Executor {
   /** Records a `failed` report on the ticket and relays the failure to the main Session in one transaction. */
   private failed(ticketId: string, summary: string): void {
     this.host.store.atomic(() => {
-      const updated = this.host.engine.report(ticketId, { state: 'failed', summary })
+      const updated = this.host.engine.report(ticketId, { state: 'failed', summary }, { by: 'host' })
       this.relay(resultRelay(updated, 'failed', summary))
     })
   }
@@ -662,7 +704,7 @@ export class DshExecutor implements Executor {
     const said = [text, stopped].filter(Boolean).join('\n\n')
     this.host.store.atomic(() => {
       const before = latestReport(current)?.summary ?? ''
-      const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before })
+      const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before }, { by: 'host' })
       // A quiet final after orchestrator_report is not a new status or an empty handoff.
       if (said) this.relay(resultRelay(updated, 'waiting', said))
       else if (!before.trim()) {

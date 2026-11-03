@@ -1,11 +1,11 @@
 /**
- * Migrates a schema 10 database to schema 11 in a single transaction so runtime readers never convert legacy shapes.
+ * Migrates a schema 10 or 11 database to schema 12 in a single transaction so runtime readers never convert legacy shapes.
  * Databases older than schema 10 are rejected: this version cannot migrate them.
  */
 import { basename } from 'node:path'
 import { z } from 'zod'
 import { isoTime, said, type AcceptMode, type AdmissionCell, type ChannelRef, type Decision, type Execution, type Follow, type MandateBasis,
-  type Reason, type Thread, type Ticket, type TicketInput, type TriggerDisposition } from '../core/index.ts'
+  type Reason, type Thread, type Ticket, type TicketInput, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { feishuChatLink } from '../sources/feishu-channel.ts'
 import { POLL_HORIZON_MS } from '../sources/poll.ts'
 import { SettingsSchema, policyVersion, type SettingsOrigin } from '../policy.ts'
@@ -17,7 +17,7 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -33,8 +33,7 @@ function step<T>(record: string, work: () => T): T {
   try { return work() } catch (error) { throw new Error(`${record}: ${error instanceof Error ? error.message : String(error)}`, { cause: error }) }
 }
 /** Rewrite all schema 10 records into their schema 11 shapes in place. */
-export function migrateTo11(store: Store): void {
-  step('the settings', () => { migrateSettingsRecords(store) })
+export function migrateTo11(store: Store): void {  step('the settings', () => { migrateSettingsRecords(store) })
   step('the prompt versions', () => { migratePrompts(store) })
   const answers = new Map<string, string[]>()
   for (const name of store.keys('answer-ready:')) {
@@ -104,6 +103,77 @@ function triggerTimes(store: Store): void {
     const createdAt = isoTime(thread.createdAt), lastAt = thread.lastAt === undefined ? undefined : isoTime(thread.lastAt)
     if (createdAt === thread.createdAt && lastAt === thread.lastAt) continue
     store.threads.save({ ...thread, createdAt, ...lastAt === undefined ? {} : { lastAt } })
+  }
+}
+/**
+ * Collapses DingTalk episode Threads (`dingtalk:<conversation>:<root>`) into one Thread per conversation
+ * (`dingtalk:<conversation>`), so a chat's messages are judged together rather than sliced by the gaps between them. A
+ * conversation's Threads merge their subscriptions, context marks, correlations, and the Triggers still queued, keep the
+ * earliest creation and the latest activity, and every Trigger, decision, and followed Thread that named a slice is renamed
+ * to the conversation. An Eval that was running when the slices merge stops holding its Triggers: they queue on the new Thread.
+ */
+export function mergeConversationThreads(store: Store): void {
+  const chatOf = (id: string): string | undefined => /^([^:]+):.+$/.exec(id)?.[1]
+  const conversationKey = (key: string): string => { const chat = key.startsWith('dingtalk:') ? chatOf(key.slice('dingtalk:'.length)) : undefined
+    return chat ? `dingtalk:${chat}` : key }
+  // A Trigger's Threads are rewritten first, so readers see the conversation before the slices are gone.
+  for (const row of store.db.prepare('SELECT id FROM trigger').all()) {
+    step(`trigger ${String(row.id)}`, () => {
+      const trigger = store.triggers.get(String(row.id))
+      if (!trigger) return
+      const threads = trigger.threads.map(ref => ref.source === 'dingtalk' ? { ...ref, id: chatOf(ref.id) ?? ref.id } : ref)
+      if (threads.every((ref, index) => ref.id === trigger.threads[index]!.id)) return
+      store.triggers.save({ ...trigger, threads })
+    })
+  }
+  // The index names Threads by key; rebuilding it from the rewritten Triggers renames the slices with them.
+  store.db.exec('DELETE FROM trigger_thread')
+  for (const row of store.db.prepare('SELECT value FROM trigger').all()) {
+    const trigger = JSON.parse(String(row.value)) as Trigger
+    const insert = store.db.prepare('INSERT OR IGNORE INTO trigger_thread VALUES (?,?,?,?)')
+    for (const ref of trigger.threads) insert.run(`${ref.source}:${ref.id}`, trigger.id, trigger.at, trigger.human ? 1 : 0)
+  }
+  const union = <T>(left: readonly T[], right: readonly T[]): T[] => [...new Set([...left, ...right])]
+  const merged = new Map<string, Thread>()
+  for (const thread of store.threads.list()) {
+    if (!thread.key.startsWith('dingtalk:')) continue
+    const key = conversationKey(thread.key)
+    if (key === thread.key) continue
+    const chat = key.slice('dingtalk:'.length)
+    const current = merged.get(key) ?? { ...thread, key, ref: { source: 'dingtalk', id: chat },
+      subscriptions: [], correlated: [], pending: [] }
+    const context = union(current.context ?? [], thread.context ?? [])
+    merged.set(key, { ...current, createdAt: thread.createdAt < current.createdAt ? thread.createdAt : current.createdAt,
+      ...(thread.lastAt ?? '') > (current.lastAt ?? '') ? { lastAt: thread.lastAt } : {},
+      subscriptions: union(current.subscriptions, thread.subscriptions), ...context.length ? { context } : {},
+      correlated: union(current.correlated, thread.correlated),
+      // An Eval that was holding Triggers can no longer finish on this Thread: its Triggers queue for the next one.
+      pending: union(current.pending, [...thread.pending, ...thread.evaluating?.triggerIds ?? []]),
+      meta: { ...thread.meta, ...current.meta } })
+    store.db.prepare('DELETE FROM thread WHERE key=?').run(thread.key)
+  }
+  const rekey = <T extends { correlated: string[]; pending: string[] }>(thread: T): T => ({
+    ...thread, correlated: [...new Set(thread.correlated.map(conversationKey))],
+    pending: [...new Set(thread.pending)] })
+  for (const row of store.db.prepare("SELECT key FROM thread").all()) {
+    const thread = store.threads.get(String(row.key))
+    if (thread) store.threads.save(rekey(thread))
+  }
+  for (const [key, thread] of merged) store.threads.save(rekey(thread))
+  for (const row of store.db.prepare("SELECT id FROM decision WHERE thread LIKE 'dingtalk:%'").all()) {
+    step(`decision ${String(row.id)}`, () => {
+      const decision = store.decisions.get(String(row.id))
+      if (!decision) return
+      const threadKey = conversationKey(decision.threadKey)
+      if (threadKey !== decision.threadKey) store.decisions.save({ ...decision, threadKey })
+    })
+  }
+  for (const row of store.db.prepare("SELECT id FROM ticket WHERE value LIKE '%dingtalk:%'").all()) {
+    step(`ticket ${String(row.id)}`, () => {
+      const ticket = store.tickets.get(String(row.id))
+      if (!ticket?.follows?.some(follow => conversationKey(follow.thread) !== follow.thread)) return
+      store.tickets.save({ ...ticket, follows: ticket.follows.map(follow => ({ ...follow, thread: conversationKey(follow.thread) })) })
+    })
   }
 }
 /**

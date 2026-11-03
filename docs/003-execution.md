@@ -8,9 +8,12 @@ Each open Ticket has one stage, determined by what it is waiting for. Read the t
 
 | Stage | Condition | Panel label |
 | --- | --- | --- |
+| person / held | An open hold names no Input, so its whole work waits on a conflict between conversations; a hold that names Inputs locks only those, and the ticket keeps its stage | Held on a conflict |
 | person / delivery | Delivering an Input to the Executor Session failed; it is retried after 2 seconds, then after a delay that doubles up to a minute, and a success, a new Assignment or the Ticket's end clears it | Input undelivered |
 | person / answer | It has an Attention | Awaiting answer |
-| person / review | The latest Report is `ready` | Awaiting review |
+| review / running | A review of the latest result runs, or the result is `ready` and its first review has not started yet (`executor.reviews`) | Under review |
+| person / returned | The last review returned the result and its worker has not reported again | Returned by review |
+| person / review | The latest Report is `ready` and the reviews are off or out of rounds, or the last review could not judge the result | Awaiting review |
 | person / blocked, failed | The latest Report is `blocked` or `failed`, and no person's message reached the Ticket since | Blocked · Failed |
 | working / queued | No Assignment, or a pending one | Queued |
 | idle | The latest Report is `waiting`, or the Assignment ended | Waiting for a Trigger |
@@ -26,7 +29,7 @@ Each Ticket gets an Executor Session named `worker-<ticket id>` and a directory 
 
 Executor Sessions run commands without approval as the operator's OS user. Their `dsh-superagent-worker` preset contains the tools needed for work and moves foreground shell commands to background jobs after 5 seconds. This lets a worker receive new messages at the next step instead of waiting for a long command to finish.
 
-The main Session uses `dsh-superagent-router`, with the same 5-second shell and job-wait limits and a smaller tool set for routing. Sessions retain the preset selected at creation. Worker subagents use DeepSeek Harness's `standard` preset.
+The main Session and each Eval's Session use `dsh-superagent-router`, with the same 5-second shell and job-wait limits and a smaller tool set for routing. An Eval Session is created when its candidate is delivered, named `eval-<eval id>` and titled by its first message, and stays readable after the Decision. Sessions retain the preset selected at creation. Worker subagents use DeepSeek Harness's `standard` preset.
 
 ### Background work and worker slots
 
@@ -89,9 +92,74 @@ The default instructions allow auto-merge only for a pull request opened for the
 
 Reviews without a body, such as approvals, also arrive as Triggers and can wake an Executor waiting for review. These instructions govern the agent, not GitHub's merge rules. To enforce approvals, require them in branch protection and dismiss stale approvals. Omit the merge CLI or remove the auto-merge paragraph to require manual merging.
 
+## The result pipeline
+
+A worker's result reaches its person through the stages `executor.reviews` and `executor.deploy` switch, in order:
+
+1. **Review** (`reviews`, on by default). A `ready` Report is not the Ticket's result: it asks for a review, which runs in a
+   Session of its own (`reviewer-<ticket>-<round>`) with the worker's directory and tools but none that change it. The Reviewer
+   reads the card, the inputs and the worker's transcript, and the diff, and finishes with `orchestrator_review`.
+   - **Passed:** the result is the Ticket's, exactly as the Report would have been: the Ticket ends as "How a Ticket ends"
+     describes, or waits for a person where it follows open pull requests.
+   - **Returned:** the findings go to the same worker as the first Input of a new Assignment, which revises the same branch.
+     A Ticket takes at most `REVIEW_ROUNDS` (3) rounds; a result returned in the last one is the Ticket's, so a person
+     decides whether to retry the worker.
+   - **Unfinished:** a review whose Session cannot start, or that ends its turn without a verdict, does not pass anything:
+     the result waits for a person as `person / review`, and the review's summary says why.
+2. **Verify** (`deploy`, off by default; needs `reviews`). The Reviewer *is* the verifier: its opening message carries the
+   deployment's `deployCommand` and `e2eCommand` in a `verify` object, and it runs them itself, in the Ticket's directory, with
+   its own shell, reading their output. Nothing runs them outside its turn — a phase that ran beside the review could pass a
+   result the Reviewer never saw, which is the opposite of an independent check. A failing command is the review's finding,
+   quoting the command's own output; with the phase on and no command named, the result is returned so a person fixes the setup.
+
+   Switching either phase in the panel takes effect at the next result, without restarting: `Reviews` reads `executor.reviews`
+   when a result arrives, and the Reviewer is wired whether or not the phase was on at startup.
+
+   A working pair of commands for the ZKAI repositories is in `scripts/deploy-test-env.sh` and `scripts/e2e-test-env.sh`. The
+   first reports which of three states the Ticket's commit is in — still only on its branch, on `dev` but not yet promoted, or
+   on `test` — and checks the built image and the live service once it is promoted. The second asks the running service what it
+   serves, so a merged commit whose pod still runs the previous image fails the review instead of passing it.
+
+   Delivery is the code running on the test environment with its checks passing there, not the existence of a merge request.
+   So the worker carries its own change the whole way: it merges its merge request into `dev` once its checks pass, promotes
+   `dev` into `test` (`git checkout test && git merge --no-ff dev && git push origin test`) to make CI deploy, and then runs the
+   checks itself. Its ticket branch is the rollback point, so the test environment may break and be repaired; production is the
+   only thing the agent never touches.
+
+### What a worker can reach
+
+A ticket directory sits wherever `executor.directory` puts it, and it should sit *inside* the operator's workspace rather than
+in the state directory. The workspace-instruction loader walks from the session's working directory upward, so a directory
+outside the workspace sees no `AGENTS.md` and no sibling repositories — which reads as an agent that cannot use the machine it
+runs on. Point `executor.directory` at a folder inside the workspace and keep `prepare` a plain `mkdir -p "$DSH_SUPERAGENT_DIR"`,
+or use `prepare` to `git worktree add` a checkout there when a ticket needs its own branch.
+
+Two paths are supplied rather than typed into instructions: `DSH_SUPERAGENT_SCRIPTS` is the installed bundle's own `scripts/`
+directory, holding the deploy, end-to-end and production-log scripts, and `DSH_SUPERAGENT_GRAFANA_ENV` is the operator's
+Grafana credential file, set per installation in the panel as **Grafana credential file**. Neither names another machine's home
+directory, so a second operator gets their own without editing prompts.
+
+### When the rounds are spent
+
+`REVIEW_ROUNDS` (3) returns bound how many times a worker may revise **within one attempt**. A result returned in the last round ends nothing by
+itself: the engine emits `ticket.reviewRoundsSpent` with the reviewer's findings, and the main Session receives it as a notice.
+The bound is per attempt, not per ticket: a review that returns a result gives the worker a new Assignment marked `revises`,
+which continues the same attempt, but a person's follow-up, a retry or `orchestrator_ticket_restart` starts a new attempt with
+its own rounds. Counting every review the ticket ever had made those restart paths useless — the worker would revise, report
+ready, and no review would run because an earlier attempt had spent the budget. Round numbers stay unique across attempts,
+because the Reviewer Session id is built from the round.
+
+That is deliberate — the orchestrator, not the worker, sees the pattern across rounds, so it is the one that can narrow the
+scope, correct an approach, or point at the code the worker kept missing. `orchestrator_ticket_restart` starts a fresh
+assignment whose first input is that instruction; leaving the ticket alone leaves it at `person / returned` for a person.
+
+A review runs outside the worker slots, up to four at a time, and a host restart starts the reviews still running again. A
+person stops a review with the Ticket. The Reviewer cannot merge, push or change the workspace: its Session's tools only read
+and check.
+
 ## How a Ticket ends
 
-- **Ready without a pull request:** a `ready` Report ends the Ticket as completed.
+- **Ready without a pull request:** a `ready` Report ends the Ticket as completed, once its review passed it when the review is on.
 - **Nothing to do:** an Executor that finds no work for a person to act on, such as a request that does not reproduce or is superseded, reports `dropped`. The Ticket ends without a message, unless a matched rule asks for one, and a person's later message on its Threads resumes it.
 ### Pull requests
 
@@ -103,7 +171,7 @@ A close does not end the Ticket while resumed, retried or recovered work is unfi
 
 Chat Channels receive one final notice about the pull-request outcome. GitHub already displays the outcome on the pull request itself. Removing a Ticket's Subscription to a pull request also stops it following that pull request.
 
-"Awaiting review" therefore means a `ready` Report with a pull request.
+"Awaiting review" therefore means a passed result with a pull request still open.
 
 ### Follow-ups and context Threads
 

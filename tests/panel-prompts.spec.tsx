@@ -19,7 +19,13 @@ it('lists the team sections, then the built-in parts, edits and saves them separ
   await click(tab(zh.promptViewFull))
   // The full prompt shows every part, team or built in, as editable, in the order the Session reads them.
   const parts = all('.dt-preview-part').map(part => [part.querySelector('b')?.textContent, part.hasAttribute('data-editable')])
-  expect(parts.slice(0, 5)).toEqual([['共享约定', true], ['主 Session 角色', true], ['沟通方式', true], ['工单范围', true], ['交付要求', true]])
+  // The shared prompt, the main Session's role and the team section it reads open the full prompt, in the order the composer
+  // lays them out. Ticket scope and Delivery describe work a Session does itself, so the main Session does not read them.
+  expect(parts.slice(0, 6)).toEqual([['共享约定', true], ['主 Session 角色', true], ['沟通方式', true], ['订阅', true], ['回复与确认', true],
+    ['路由', true]])
+  // The full prompt previews the main Session's parts, which the Reviewer's role is not one of.
+  expect(names.slice(3)).toEqual(Object.keys(builtInParts()).map(key => zh[`promptPart.${key}` as keyof typeof zh]))
+  expect(names).toContain('复核角色')
   expect(text()).toContain('Custom communication rule')
   await click(all('.dt-preview-part').find(part => part.querySelector('b')?.textContent === '沟通方式')!.querySelector('button')!)
   await click(zh.promptResetSection)
@@ -97,7 +103,8 @@ it('marks team sections that differ from the defaults, and shows a draft as a di
   expect(all('.dt-preview-part del')).toHaveLength(0)
   expect(text()).toContain(zh.promptSameAsSaved)
   await click(zh.promptCompareDefault)
-  expect(all('.dt-preview-part ins').map(line => line.textContent)).toEqual(['Sign as the agent.\n', 'Commit as the bot account.\n'])
+  // The main Session does not read the Delivery section, so only its own change appears; the worker's view shows both.
+  expect(all('.dt-preview-part ins').map(line => line.textContent)).toEqual(['Sign as the agent.\n'])
 })
 
 it('discards a prompt draft by reading the saved version again', async () => {

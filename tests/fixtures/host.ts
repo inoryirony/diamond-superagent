@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { vi, type Mock } from 'vitest'
+import { expect, vi, type Mock } from 'vitest'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { Runtime } from '../../src/app/runtime.ts'
 import { Store } from '../../src/app/store.ts'
@@ -15,7 +15,8 @@ import { feishuKind, feishuTrigger } from '../../src/sources/feishu.ts'
 import { githubKind } from '../../src/sources/github.ts'
 import { Commands } from '../../src/infra/commands.ts'
 import { credentialHelper, workerGitConfig } from '../../src/infra/environment.ts'
-import type { Trigger } from '../../src/core/index.ts'
+import { reviewerSessionId } from '../../src/executor/dsh.ts'
+import type { ReviewReport, Trigger } from '../../src/core/index.ts'
 import { testMachine } from './deployment.ts'
 
 export const MEMBER = 'ou_alice'
@@ -152,18 +153,27 @@ export async function startRuntime(seed?: (store: Store) => void) {
   }
   /** A prepare command (`sh -c`) waits for this while it is set. */
   const hooks: { prepare?: Promise<void> } = {}
+  /** Scripts whose `sh -c` invocation must fail, by script text, with the message its stderr carries. */
+  const failures = new Map<string, Error>()
   const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
     const argv = [...spec.argv]
     while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
     const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
-    const exited = { exitCode: 0, signal: null }
-    const done = argv[0] === 'sh' && hooks.prepare ? hooks.prepare.then(() => exited) : Promise.resolve(exited)
-    return { done, collected: { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') } }
+    const script = argv[0] === 'sh' && argv[1] === '-c' ? argv[2] ?? '' : ''
+    // `failures` holds scripts that exit non-zero, so a test can make a prepare, deploy or end-to-end command fail.
+    const exitCode = failures.get(script) ?? 0
+    const exited = { exitCode, signal: null }
+    const done = argv[0] === 'sh' && hooks.prepare && exitCode === 0 ? hooks.prepare.then(() => exited) : Promise.resolve(exited)
+    return { done, collected: { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader(failures.has(script) ? (failures.get(script)!.message ?? '') : '') } }
   }) }
   const agents = new Map<string, FakeAgent>()
   /** Each Session's next step, which takes the messages that wait for one. */
   const steps = new Map<string, () => void>(), claims = new Map<string, () => void>()
   const tools = new Map<string, Map<string, RegisteredTool>>()
+  /** What each Session's fake model called, as DSH logs it: the log a ready report is checked against. */
+  const logs = new Map<string, { type: string; time: number; data: unknown }[]>()
+  /** What each Session was restricted to, in order: the `restrict` specs the Sessions bundle registered. */
+  const restricts = new Map<string, unknown[]>()
   const deliveries = vi.fn<(request: Delivery) => void>()
   let http!: HttpHandler
   const resolveDefault = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
@@ -174,7 +184,8 @@ export async function startRuntime(seed?: (store: Store) => void) {
       const sessionTools = new Map<string, RegisteredTool>()
       tools.set(sessionId, sessionTools)
       const register = (tool: RegisteredTool) => { sessionTools.set(tool.name, tool); return () => sessionTools.delete(tool.name) }
-      agentCtx.reflect.provide('tools', { register, get: () => undefined, restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) })
+      agentCtx.reflect.provide('tools', { register, get: (name: string) => name === 'pwsh' ? undefined : {},
+        restrict: vi.fn((spec: unknown) => { restricts.set(sessionId, [...restricts.get(sessionId) ?? [], spec]); return () => {} }), guard: vi.fn(() => () => {}) })
       agentCtx.reflect.provide('skills', { register: () => () => {} })
       agentCtx.reflect.provide('systemPrompt', { section: () => () => {} })
       const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[],
@@ -210,7 +221,9 @@ export async function startRuntime(seed?: (store: Store) => void) {
         turn++
         take(true)
       })
-      const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
+      const events: { type: string; time: number; data: unknown }[] = []
+      logs.set(sessionId, events)
+      const session = { id: sessionId, snapshotEvents: () => events, requestHeader: () => undefined, append: vi.fn() }
       let status = 'idle'
       const idle: (() => void)[] = []
       // A cancel drops the inbox unless kept, and the turn it stops ends a moment later, which DSH says.
@@ -257,19 +270,59 @@ export async function startRuntime(seed?: (store: Store) => void) {
     policy: { ...settings.policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } },
     sources: { ...sources, feishu: { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
   deliveries.mockClear()
+  // Reviews answer every round with the configured verdict, as a Reviewer Session would: the verdict `reviews(answer)` names,
+  // or `passed` when it names none. A test sets the answer before the result whose review it judges.
+  const reviews: { verdict: ReviewReport; answers: Map<string, ReviewReport>; sessions: string[] } = { sessions: [],
+    verdict: { outcome: 'passed', summary: 'Checked the diff and ran the tests.' }, answers: new Map() }
+  // The host stands in for the Reviewer Session's model only when a test answers: by default the Session's turn runs on, as
+  // a real Reviewer's would, until the test finishes the review with `finishReview` or steps the Session itself.
+  runtime.reviewers.answer = (ticketId, round) => reviews.answers.get(`${ticketId}:${round}`)
 
   /** Parsed JSON payloads delivered to `sessionId`. */
   const relays = (sessionId: string) => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId === sessionId)
     .map(call => JSON.parse(call.text) as Record<string, unknown>)
-  const candidates = () => relays(runtime.masterId).filter(item => item.kind === 'candidate').map(item => item.trigger_id)
+  /** Candidate cards, oldest first, each delivered to its own Eval Session. */
+  const cards = () => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId.startsWith('eval-'))
+    .map(call => JSON.parse(call.text) as Record<string, unknown>).filter(item => item.kind === 'candidate')
+  const candidates = () => cards().map(item => item.trigger_id)
+  /** The Eval Session that last received the candidate card of `triggerId`, else the main Session, which routes explicit requests too. */
+  const evalSession = (triggerId: string) => deliveries.mock.calls.map(([call]) => call)
+    .filter(call => call.sessionId.startsWith('eval-') && (JSON.parse(call.text) as { trigger_id?: string }).trigger_id === triggerId).at(-1)?.sessionId ?? runtime.masterId
+  /** Answers every following review with `verdict`, as the Reviewer Session of that round would. */
+  const review = (verdict: ReviewReport) => { reviews.verdict = verdict }
+
+  /**
+   * Finishes the review running on `ticketId` with the answer a Reviewer Session gives: the verdict `review` set, unless
+   * `verdict` names another. It runs in the review's own Session, which a test steps through like any other.
+   */
+  const finishReview = async (ticketId: string, verdict?: ReviewReport) => {
+    const ticket = runtime.store.tickets.get(ticketId)!
+    const round = ticket.reviews!.at(-1)!.round
+    const sessionId = reviewerSessionId(ticketId, round)
+    // The review's Session is up once the effect queue started it; a verdict before that would have no run to record it.
+    await vi.waitFor(() => expect(runtime.reviewers.agent(ticketId, round)).toBeDefined(), { timeout: 5000 })
+    await runtime.reviewers.reviewed(sessionId, verdict ?? reviews.verdict)
+  }
+  /** The fake model of `sessionId` called `name`, as DSH logs a call when it starts. */
+  const ran = (sessionId: string, name = 'bash') => { logs.get(sessionId)?.push({ type: 'tool/call', time: Date.now(), data: { name } }) }
+  /** Whether a worker is taken to have run a check before each ready report; a test of the evidence rule itself turns it off. */
+  const checks = { before: true }
   const runTool = async (sessionId: string, name: string, args: unknown) => {
     const tool = tools.get(sessionId)?.get(name)
     if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
+    if (checks.before && name === 'orchestrator_report' && (args as { state?: string }).state === 'ready') ran(sessionId)
+    // DSH logs every call as it starts, with the raw arguments the model produced.
+    logs.get(sessionId)?.push({ type: 'tool/call', time: Date.now(), data: { name, arguments: JSON.stringify(args) } })
     return await tool.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
   }
-  /** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
+  /** The read a model makes of a trigger's conversation before it attaches or answers: its resource, which carries the live history. */
+  const readTrigger = (sessionId: string, triggerId: string) => runTool(sessionId, 'orchestrator_read', { resource: `trigger/${triggerId}` })
+  /** Route one decision with orchestrator_route in the Session that holds its candidate, answering its result; a refused one throws its reason. */
   async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
+    const sessionId = typeof item.trigger_id === 'string' ? evalSession(item.trigger_id) : runtime.masterId
+    // A model reads the conversation before it attaches or answers, as dispatch asks and the host enforces.
+    if (item.kind === 'attach' || item.kind === 'answer') await readTrigger(sessionId, String(item.trigger_id)).catch(() => undefined)
+    const { results } = await runTool(sessionId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
     if (results[0]!.refused) throw new Error(String(results[0]!.refused))
     return results[0]!
   }
@@ -293,7 +346,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
-  return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
-    jobs, subagents, step, claim }
+  return { runtime, ctx, directory, agents, tools, deliveries, relays, cards, candidates, evalSession, runTool, route, acceptedTicket, api, controller, subprocess, hooks, failures, resolveDefault, stop,
+    jobs, subagents, step, claim, review, finishReview, reviews, ran, checks, restricts, readTrigger }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>
