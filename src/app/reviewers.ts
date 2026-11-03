@@ -157,9 +157,17 @@ export class Reviewers implements ReviewerPort, ReviewerSessions {
       const newerWork = !reviewed || ticket.assignments.at(-1)?.id !== review.assignmentId
         || (!!reviewed.report && reviewed.report.at > review.at)
       if (newerWork) {
-        this.host.store.atomic(() => this.host.engine.reviewEnded(ticket.id,
-          { outcome: 'passed', unfinished: true,
-            summary: `Review ${review.round} was superseded: the ticket moved past the result it judged, so it cannot be settled.` }))
+        // Recorded directly rather than through `Reviews.end`, which settles only the newest review: a superseded one is by
+        // definition not the newest, so going through it threw `noReviewRunning` and left this cleanup half done.
+        this.host.store.atomic(() => {
+          const current = this.host.store.tickets.get(ticket.id)
+          const stale = current?.reviews?.find(item => item.round === review.round && !item.ended)
+          if (!current || !stale) return
+          stale.ended = { at: new Date().toISOString(), outcome: 'passed', unfinished: true,
+            summary: `Review ${review.round} was superseded: the ticket moved past the result it judged, so it cannot be settled.` }
+          current.updatedAt = stale.ended.at
+          this.host.store.tickets.save(current)
+        })
         continue
       }
       this.review({ ticketId: ticket.id, assignmentId: review.assignmentId, round: review.round })
