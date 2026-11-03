@@ -1,19 +1,47 @@
-# dsh-superagent
+# diamond-superagent
 
-> **Research prototype for reference only, not an official DeepSeek product.** This code grew out of our team's day-to-day development work, with much of the engineering done by coding agents. Treat it as research code, not production-ready software. It may still contain bugs, and its coding style and engineering practices may be inconsistent. Review and adapt it before using it in your own environment.
->
-> We have adapted it for publication, so it is not identical to our internal version or the implementation described in *Exploring Super-agent Design: Towards a More Autonomous Agent System*. Some designs discussed in the article are directions for future development and are not implemented in this prototype.
+*Reimagining what a super agent can do for one person.*
 
-dsh-superagent is a proactive coding agent for one GitHub repository, packaged as a bundle for [DeepSeek Harness](https://www.deepseek.com/en/harness/). It listens to GitHub, Feishu, DingTalk, Jira or GitLab; each Source is optional. When someone allowed asks the agent for work, it opens a work item, works on it in its own agent session and directory, and answers in the original conversation, for example with a pull request. A web panel shows what needs a person.
+A proactive agent for one person's actual work: it listens in the conversations where work is asked for, decides whether
+a request is authorized, turns it into a ticket, executes the ticket in its own agent Session, and answers where the
+question was asked. A panel shows what needs a person.
 
-It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
+This repository is not a fresh design. It is the **merge of two earlier attempts**:
+
+| Lineage | What it was | What diamond-superagent keeps from it |
+| --- | --- | --- |
+| [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) | a Source → Eval → Ticket → Executor orchestrator, packaged as a DeepSeek Harness bundle | the domain model (Source, Thread, Ticket, Mandate, Assignment), the Policy gate, the review chain, the management panel, the Executor Sessions |
+| [PROJECT D.I.A.M.O.N.D.](https://github.com/inoryirony/dws-chat-agent) — *DingTalk-Integrated Agent for Messaging, Orchestration & Networked Delegation* | an autonomous DingTalk front: watch an allowlist, answer direct messages, escalate implementation work to a coding agent, and stream a card that turns from "working on it" into the answer | the DingTalk Source as a first-class citizen — the operator's own account speaks, `dws` carries the history and the writes, a streaming card covers the wait, the sender's 花名（真名） is resolved from the company directory, and the operator's own messages are admitted |
+| neither | the lane model below | one Session per conversation, the ticket board as the only channel between lanes, and a hold on contradictions |
+
+The name is the D.I.A.M.O.N.D. lineage carried forward, not a marketing rename. The plugin keeps the package name
+`dsh-superagent` and the profile keeps the name `superagent`, because profiles, `cordis.patch.yml` entries and the
+`dsh-superagent-*` Source skills all reference those strings; renaming them would break every existing installation
+without changing anything a person sees.
+
+## Why merge them
+
+Each solved half of the problem:
+
+- **dsh-superagent** could gate, ticket, isolate and review work, but its DingTalk source was a thin adapter, and its
+  single main Session read every conversation, so its context grew without bound and a question and the correction that
+  contradicted it fell into different 10-minute slices.
+- **D.I.A.M.O.N.D.** spoke perfect DingTalk — steering a live turn, streaming a card, resolving a sender, taking over
+  from the operator — but had no policy, no ticket, no isolation and no review: the coding agent ran in the service's own
+  process and answered unstructured text.
+
+Merged, the DingTalk surface becomes the body and the ticket machinery becomes the skeleton: a **lane** is one
+conversation, each lane has a Session that reads the whole conversation, and work that crosses a lane becomes a
+**Ticket** on a shared board with a monotonic sequence number. A contradiction between two conversations is parked on the
+Ticket as a **Hold**, never decided by the agent.
 
 ## How it works
 
 Five stages, each a real boundary rather than a convention:
 
-1. **A Source** turns raw traffic into a Trigger: a GitHub Issue comment, a Feishu or DingTalk message, a Jira ticket, a
-   GitLab merge-request note. Every Source declares which Threads a Trigger belongs to.
+1. **A Source** turns raw traffic into a Trigger: a DingTalk direct message or group mention (via `dws`), a GitHub Issue
+   comment, a Feishu message, a Jira ticket, a GitLab merge-request note. Every Source declares which Threads a Trigger
+   belongs to.
 2. **A lane** is one Thread that carries people — one conversation, one Issue, one topic. Each lane has a Session of its
    own that reads the whole conversation and assesses every message in it. Lanes never talk to each other; nothing
    crosses a lane boundary except through the board below.
@@ -23,13 +51,23 @@ Five stages, each a real boundary rather than a convention:
    been told since. All Tickets together are the *board* — the only channel between lanes, carrying a monotonic sequence
    number so that a lane committing a stale read is asked to look again instead of overwriting.
 5. **An Executor Session** runs the Ticket in its own conversation and directory, and reports back when it is done,
-   blocked, or needs a decision; that report (optionally reviewed) becomes the Ticket's outcome. Waiting on a person is a
-   normal end state, not a failure: the Ticket sits at `person/*` until they act.
+   blocked, or needs a decision; that report is optionally reviewed (and, for a deployable change, verified on the test
+   environment by the reviewer itself) before it becomes the Ticket's outcome. Waiting on a person is a normal end
+   state, not a failure: the Ticket sits at `person/*` until they act.
 
 Two things a person may have to settle are first-class: an **Attention** (one concrete question, in a structured form)
 and a **Hold** (a contradiction between two conversations parked on the Ticket, with the options a release may pick and a
 deadline after which it escalates). Neither a lane nor the System decides a contradiction; the system only keeps it
 visible until someone does.
+
+```text
+DingTalk / GitHub / Feishu / Jira / GitLab
+  -> Source (per-conversation Thread = one lane)
+  -> Policy gate: who, what, which mode
+  -> Ticket on the shared board (monotonic sequence)
+  -> Executor Session in its own worktree
+  -> Report -> [Review -> Verify] -> answer in the original conversation
+```
 
 The full domain model is [docs/001-domain.md](docs/001-domain.md); the stages in [docs/003-execution.md](docs/003-execution.md);
 the lane and board design in [docs/009-lanes-and-conflicts.md](docs/009-lanes-and-conflicts.md); the module map in
@@ -39,9 +77,11 @@ the lane and board design in [docs/009-lanes-and-conflicts.md](docs/009-lanes-an
 
 Setup has many steps, so an agent does it with you. Ask your coding agent:
 
-> Read SETUP.md in this repository and set up dsh-superagent with me.
+> Read SETUP.md in this repository and set up diamond-superagent with me.
 
-It asks one short question at a time, shows the full plan once, and then installs and configures everything. [SETUP.md](SETUP.md) is what it follows.
+It asks one short question at a time, shows the full plan once, and then installs and configures everything. [SETUP.md](SETUP.md)
+is what it follows. DingTalk needs a working `dws` login as the operator; GitHub needs a dedicated agent account and its
+own `gh`; Feishu, Jira and GitLab are optional.
 
 ## Documentation
 
@@ -77,6 +117,14 @@ pnpm exec vite --config demo/vite.config.ts           # the same, run by hand
 recipes and a feature map of the panel. Evidence goes to `.artifacts/verification/<timestamp>/`, which is git-ignored and
 survives teardown.
 
+## Status and honesty
+
+The panel, the Sources, the board and the lane model run. The `Reach{source, person}` item — delivering one question to
+the same person on every Source they use — is not implemented: a Hold's escalation still addresses conversations, not
+people. `GET /orchestrator/api/policy/history` answers 500 on the current build. Treat this as research code shaped by
+daily use, not a product.
+
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Upstream `dsh-superagent` and `dws-chat-agent` are MIT; their copyright notices are kept in the history
+and in this repository's licence.

@@ -144,16 +144,16 @@ describe('jira kind', () => {
 describe('jira authentication', () => {
   it('sends a personal access token as Bearer and a user:password pair as Basic', () => {
     expect(jiraAuthorization('abc123')).toBe('Bearer abc123')
-    expect(jiraAuthorization('matianze:secret')).toBe(`Basic ${Buffer.from('matianze:secret').toString('base64')}`)
+    expect(jiraAuthorization('alice:secret')).toBe(`Basic ${Buffer.from('alice:secret').toString('base64')}`)
   })
   it('reads the account a Basic pair acts as, so an installation without PATs still resolves', async () => {
     const probe = vi.fn(async (_url: string, token: string) => {
       expect(jiraAuthorization(token)).toMatch(/^Basic /)
-      return JSON.stringify({ name: 'matianze', displayName: 'Ma Tianze' })
+      return JSON.stringify({ name: 'alice', displayName: 'Alice' })
     })
     const account = await resolveJira({ stateDir: '/tmp' } as never,
-      { baseUrl: 'https://issue.hsjdata.com', patEnv: 'JIRA_BASIC' }, probe, { JIRA_BASIC: 'matianze:secret' })
-    expect(account).toEqual({ baseUrl: 'https://issue.hsjdata.com', patEnv: 'JIRA_BASIC', name: 'matianze', displayName: 'Ma Tianze' })
+      { baseUrl: 'https://issue.hsjdata.com', patEnv: 'JIRA_BASIC' }, probe, { JIRA_BASIC: 'alice:secret' })
+    expect(account).toEqual({ baseUrl: 'https://issue.hsjdata.com', patEnv: 'JIRA_BASIC', name: 'alice', displayName: 'Alice' })
     expect(probe.mock.calls[0]![0]).toBe('https://issue.hsjdata.com/rest/api/2/myself')
   })
 })
