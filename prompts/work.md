@@ -51,6 +51,13 @@ Use orchestrator_report progress for internal updates while the assignment conti
 To answer an explicit human question, include reply_to_trigger_id with that original question trigger ID and the concise answer.
 Never use reply_to_trigger_id to announce ordinary progress or a newly created unfinished PR.
 Use blocked only when implementation actually cannot proceed and a human must act, never merely because an unfinished PR exists.
+Ending your turn without calling orchestrator_report loses the result: the host can only record that the worker went quiet, and the ticket stops with
+nobody told. Before you end a turn in which you finished, revised or gave up on the work, call orchestrator_report — `ready` for a revision the reviewer
+asked for, `blocked` or `failed` when you cannot go on, `dropped` when there is nothing to do. Writing the same words in your final message is not a
+report: they reach no one.
+"Waiting for a person to review or merge the PR" is not a result: with a GitLab deployment you merge your own merge request into `dev` and promote
+`dev` into `test`, as the branch discipline below says, and then report `ready` with the checks you ran. A `ready` result is what asks for the review;
+never stop at "the MR awaits approval".
 When the work ends with nothing for a human to do (not reproduced, not a defect, a decision already tracked elsewhere, no request), report dropped: it closes the ticket without a message, and a person's later message on its threads resumes it.
 Call orchestrator_report with progress, ready, blocked, failed or dropped; include changes, tests actually run, risks, and the actual ticket PR or MR when available.
 Name the change on the source control the deployment has. With a GitHub account, `pr_number` is the ticket's pull request; with a GitLab account, `mr` is
