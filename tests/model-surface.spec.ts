@@ -28,7 +28,7 @@ type Role = 'orchestrator' | 'worker'
 interface Surface { where: string; owner: string; role: Role | 'both' | 'reviewer'; text: string }
 interface Tool {
   name: string; description: string; parameters: unknown
-  execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown>
+  execute: (args: unknown, execution: { signal: AbortSignal; concludeTurn: () => void }) => Promise<unknown>
 }
 type Section = (context: { signal?: AbortSignal }) => string
 interface Skill { name: string; description: string; content: string }
@@ -37,7 +37,7 @@ interface Skill { name: string; description: string; content: string }
  * Maximum combined character count of system prompt and tool definitions per role (~5% above baseline).
  * Lower this limit when shrinking model-facing text; raise it only intentionally and explain why in the commit message.
  */
-const BUDGET: Record<Role, number> = { orchestrator: 61_500, worker: 45_400 } // orchestrator +4500: the two hold tools, their option schemas, and the lane fields a card carries; worker unchanged
+const BUDGET: Record<Role, number> = { orchestrator: 61_500, worker: 46_300 } // orchestrator +4500: the two hold tools, their option schemas, and the lane fields a card carries; worker +900: the report tool's work kind and the pointer to an earlier worker generation, which save a review round and a whole Session's history
 const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
 const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
 const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'
@@ -157,7 +157,7 @@ async function start() {
     if (name === 'orchestrator_report' && (args as { state?: string }).state === 'ready') logs.get(sessionId)?.push({ type: 'tool/call', time: Date.now(), data: { name: 'bash' } })
     // DSH logs every call as it starts, with the raw arguments the model produced.
     logs.get(sessionId)?.push({ type: 'tool/call', time: Date.now(), data: { name, arguments: JSON.stringify(args) } })
-    return await tools.get(sessionId)!.get(name)!.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
+    return await tools.get(sessionId)!.get(name)!.execute(args, { signal: new AbortController().signal, concludeTurn: () => {} }) as Record<string, unknown>
   }
   const stop = async () => { await runtime.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) }
   return { ctx, runtime, agents, tools, sections, skills, inputs, run, stop }
@@ -184,12 +184,14 @@ async function drive(host: Host) {
   const proposal = feishu('5', '把副标题改成“浏览网页”', { mentions: [] })
   await runtime.receive(proposal)
   vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_5', chat_id: CHAT }] })
-  await run(master, 'orchestrator_eval', { trigger_id: proposal.id })
-  const proactive = (await run(master, 'orchestrator_eval_decide', { trigger_id: proposal.id, decision: 'accept', title: '文案修订', worktree_name: 'copy-fix',
-    scope: '改副标题', reason: 'explicit copy change', intent_evidence: 'quoted', acknowledgement: '收到，把副标题改成“浏览网页”。',
-    rule_assessments: [{ rule_id: 'copy', matched: true, reason: 'copy change' }, { rule_id: 'visual', matched: false, reason: 'not visual' }],
-    direction: { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'it names the text' } })).ticket as { ticket_id: string }
-  const b = proactive.ticket_id
+  // A proactive candidate is judged in the same call that records the judgement: its rule assessments travel with the decision.
+  const { results: assessed } = await run(master, 'orchestrator_route', { decisions: [{ kind: 'assess', trigger_id: proposal.id,
+    assessment: { decision: 'accept', title: '文案修订', worktree_name: 'copy-fix', scope: '改副标题', reason: 'explicit copy change',
+      intent_evidence: 'quoted', acknowledgement: '收到，把副标题改成“浏览网页”。',
+      rule_assessments: [{ rule_id: 'copy', matched: true, reason: 'copy change' }, { rule_id: 'visual', matched: false, reason: 'not visual' }],
+      direction: { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'it names the text' } } }] }) as
+    { results: { ticketId?: string }[] }
+  const b = assessed[0]!.ticketId!
   await runtime.idle()
   const [workerA, workerB] = [a, b].map(workerSessionId) as [string, string]
   await run(workerA, 'orchestrator_report', { state: 'progress', summary: 'Needs a decision.', human_action: 'Desktop too?' })
@@ -199,14 +201,14 @@ async function drive(host: Host) {
   // The main Session reads the conversation of a message before it attaches it, as dispatch asks.
   await run(master, 'orchestrator_read', { resource: `trigger/${other.id}` })
   await run(master, 'orchestrator_route', { decisions: [{ kind: 'attach', ticket_id: a, trigger_id: other.id }] })
-  await run(workerA, 'orchestrator_thread_unrelated', { thread: `feishu:${CHAT}:om_9`, reason: 'It asks for something else.' })
-  await run(workerA, 'orchestrator_thread_follow', { thread: `feishu:${CHAT}:om_7`, reason: 'The same settings page.' })
+  await run(workerA, 'orchestrator_report', { state: 'progress', summary: 'x', threads: [{ thread: `feishu:${CHAT}:om_9`, reason: 'It asks for something else.' }] })
+  await run(workerA, 'orchestrator_report', { state: 'progress', summary: 'x', threads: [{ follow: `feishu:${CHAT}:om_7`, reason: 'The same settings page.' }] })
   await runtime.receive(feishu('7', '@bot 这个页面的按钮也改一下'))
   const beyond = feishu('8', '另外把导出也做了', { mentions: [], root_id: 'om_1' })
   await runtime.receive(beyond)
   await runtime.idle()
-  await run(workerA, 'orchestrator_trigger_handback', { trigger_id: beyond.id, reason: 'It asks for an export feature.' })
-  await run(master, 'orchestrator_ticket_note', { ticket_id: a, text: 'Ticket B changes the same settings page.' })
+  await run(workerA, 'orchestrator_report', { state: 'progress', summary: 'x', threads: [{ handback: beyond.id, reason: 'It asks for an export feature.' }] })
+  await run(master, 'orchestrator_ticket', { action: 'note', ticket_id: a, text: 'Ticket B changes the same settings page.' })
   await runtime.pump()
   await runtime.idle()
   await run(workerA, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
@@ -370,10 +372,12 @@ function failures(): Map<string, string> {
 }
 
 it('collects both roles\' tools, prompts, skills and inputs', () => {
-  expect([...toolsOf('worker').keys()].sort()).toEqual(['orchestrator_ack', 'orchestrator_read', 'orchestrator_report',
-    'orchestrator_thread_follow',
-    'orchestrator_thread_unrelated', 'orchestrator_trigger_handback'])
-  expect([...toolsOf('orchestrator').keys()]).toEqual(expect.arrayContaining(['orchestrator_route', 'orchestrator_eval_decide', 'orchestrator_reply']))
+  // The worker's whole surface: the ticket record it reads, and the two ends of the work — the acknowledgement before it, and
+  // the report after it, whose `threads` carries what used to be three tools of their own.
+  expect([...toolsOf('worker').keys()].sort()).toEqual(['orchestrator_ack', 'orchestrator_read', 'orchestrator_report'])
+  // The orchestrator's whole surface: the record it reads, the one tool that decides a message's fate, and the one that changes
+  // a ticket. Seventeen tools used to say this; three do.
+  expect([...toolsOf('orchestrator').keys()].sort()).toEqual(['orchestrator_read', 'orchestrator_route', 'orchestrator_ticket'])
   // The one routing tool takes the place of four.
   for (const name of ['orchestrator_ticket_accept', 'orchestrator_ticket_attach', 'orchestrator_ticket_stop', 'orchestrator_trigger_ignore']) {
     expect(toolsOf('orchestrator').has(name)).toBe(false)

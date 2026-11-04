@@ -14,7 +14,8 @@ async function reviewing() {
   const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot 修一下回归'))
   await host.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done.', evidence: [{ what: 'pnpm test', result: '12 passed' }] })
   const reviewer = reviewerSessionId(ticket.id, 1)
-  await vi.waitFor(() => expect(host.agents.get(reviewer)).toBeDefined(), { timeout: 5000 })
+  // The Session exists before it is decorated, so wait for the tools its review is judged through rather than for the agent.
+  await vi.waitFor(() => expect(host.tools.get(reviewer)?.has('orchestrator_review')).toBe(true), { timeout: 5000 })
   return { host, ticket, sessionId, reviewer }
 }
 const endedReview = (host: Host, ticketId: string) => host.runtime.store.tickets.get(ticketId)!.reviews![0]!.ended

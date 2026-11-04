@@ -74,9 +74,14 @@ it('lists in prompts the built-in parts whose text changed since the team overro
 })
 
 it('saves with the prompt save tool an override without its base, refuses a part no version has, and drops a removed one read back', async () => {
-  const save = (overrides: Record<string, unknown>) => h.runTool(h.runtime.masterId, 'orchestrator_prompts_save',
-    { config: { ...defaultPrompts(), overrides }, baseRevision: h.runtime.prompts.current().revision })
-  await expect(save({ constructor: { text: 'x' } })).rejects.toThrow(new UserError('unknownPromptPart', { part: 'constructor' }))
+  // Prompts are saved through the panel route, which is the only writer: the agent holds no copy of a human's configuration tool.
+  const save = async (overrides: Record<string, unknown>) => {
+    const revision = h.runtime.prompts.current().revision
+    const result = await h.api('PUT', 'prompts', { config: { ...defaultPrompts(), overrides }, baseRevision: revision })
+    if (result.status !== 200) throw new Error(JSON.stringify(result.body))
+    return result.body
+  }
+  await expect(save({ constructor: { text: 'x' } })).rejects.toThrow(/Unknown built-in prompt part constructor/)
   await save({ 'runtime/dispatch': { text: '## dispatch\nOurs.' } })
   const dispatch = { text: '## dispatch\nOurs.', base: builtInBase(builtInParts()['runtime/dispatch'].text) }
   expect(h.runtime.prompts.current().config.overrides).toEqual({ 'runtime/dispatch': dispatch })
@@ -85,11 +90,8 @@ it('saves with the prompt save tool an override without its base, refuses a part
     'runtime/retired': { text: 'Old.', base: 'b' } } }
   h.runtime.store.set(KV.prompts.version(revision + 1), { revision: revision + 1, previousRevision: revision, savedAt: '', source: 'panel', config: read })
   h.runtime.store.set(KV.prompts.revision, revision + 1)
-  await h.runTool(h.runtime.masterId, 'orchestrator_prompts_save', { config: read, baseRevision: revision + 1 })
+  await h.api('PUT', 'prompts', { config: read, baseRevision: revision + 1 })
   expect(h.runtime.prompts.current().config.overrides).toEqual({ 'runtime/dispatch': dispatch })
-  // The tool describes the overrides once, in its schema.
-  const tool = h.tools.get(h.runtime.masterId)!.get('orchestrator_prompts_save') as unknown as { description: string }
-  expect(tool.description).not.toContain('overrides')
 })
 
 it('keeps the main Session\'s resources from an Executor Session, which lists only its own', async () => {
@@ -105,7 +107,7 @@ it('keeps the main Session\'s resources from an Executor Session, which lists on
   expect(offered).not.toMatch(/preview/i)
 })
 
-it('answers every routing tool in one shape: the decision it recorded, why, and the ticket card', async () => {
+it('answers every routing kind in one shape: the decision it recorded, why, and the ticket card', async () => {
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const card = expect.objectContaining({ ticket_id: ticket.id })
   const run = (name: string, args: unknown) => h.runTool(h.runtime.masterId, name, args)
@@ -115,10 +117,10 @@ it('answers every routing tool in one shape: the decision it recorded, why, and 
   await h.readTrigger(h.runtime.masterId, other.id)
   expect(await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: other.id })).toEqual({ trigger_id: other.id, kind: 'attach',
     reason: expect.any(String), ticket: card })
-  const status = await run('orchestrator_ticket_request_status', { ticket_id: ticket.id })
+  const status = await run('orchestrator_ticket', { ticket_id: ticket.id, action: 'status' })
   expect(status).toEqual({ reason: 'The worker is not waiting; nothing was sent', ticket: card })
   await h.runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'The build broke.' })
-  expect(await run('orchestrator_ticket_retry', { ticket_id: ticket.id })).toEqual({ reason: 'Started a new assignment', ticket: card })
+  expect(await run('orchestrator_ticket', { ticket_id: ticket.id, action: 'retry' })).toEqual({ reason: 'Started a new assignment', ticket: card })
   const chatter = feishu('4', '@bot 谢谢')
   h.runtime.receive(chatter); await h.runtime.idle()
   expect(await route({ kind: 'ignore', trigger_id: chatter.id, reason: 'thanks' })).toEqual({ trigger_id: chatter.id, kind: 'ignore', decision: 'ignore',
@@ -278,7 +280,7 @@ it('ignores a proactive candidate from its card beside other decisions, marked s
 it('returns where a reply stands: sent, or dropped when its conversation can no longer receive it', async () => {
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
-  const reply = (text: string) => h.runTool(h.runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text })
+  const reply = (text: string) => h.runTool(h.runtime.masterId, 'orchestrator_ticket', { action: 'reply', ticket_id: ticket.id, purpose: 'result', text })
   expect(await reply('修好了。')).toEqual({ status: 'sent' })
   vi.mocked(Commands.prototype.lark).mockRejectedValue(new CliError('the message was withdrawn', 230011))
   expect(await reply('修好了，请看 PR。')).toEqual({ status: 'dropped' })
@@ -293,30 +295,32 @@ it('checks an acknowledgement against the IM word limit, not a character count',
 })
 
 it('saves a settings block by name, a Source\'s block with the Source\'s id', async () => {
-  const save = (args: Record<string, unknown>) => h.runTool(h.runtime.masterId, 'orchestrator_settings_save', args)
+  // Settings are a human's: the panel route writes them, and the agent's surface holds no copy of it.
   const github = { config: h.runtime.store.settings().sources.github!.config, revision: h.runtime.store.blockRevision('source:github') }
   const off = { enabled: false, config: github.config }
-  await expect(save({ block: 'source', value: off, revision: github.revision })).rejects.toThrow('source names the Source')
-  await expect(save({ block: 'source:github', value: off, revision: github.revision })).rejects.toThrow()
-  expect(await save({ block: 'source', source: 'github', value: off, revision: github.revision })).toMatchObject({ saved: true })
+  expect((await h.api('PUT', 'settings/source:github', { value: off, revision: github.revision })).status).toBe(200)
   expect(h.runtime.store.settings().sources.github?.enabled).toBe(false)
-  expect(await save({ block: 'pause', value: { paused: true }, revision: 0 })).toEqual({ paused: true })
+  // Pausing is its own route, outside every settings block.
+  expect((await h.api('POST', 'executor/pause', { paused: true })).status).toBe(200)
+  expect(h.runtime.store.settings().paused).toBe(true)
 })
 
 it('previews a prompt configuration without saving it, and saves one only against the revision it edits', async () => {
-  const save = (args: Record<string, unknown>) => h.runTool(h.runtime.masterId, 'orchestrator_prompts_save', args)
-  const config = { ...h.runtime.prompts.current().config, scope: 'Finish what was asked.' }
-  const preview = await save({ config, preview: true }) as { previews: { role: string; read: string }[] }
-  expect(preview.previews.map(item => item.role)).toEqual(['orchestrator', 'worker'])
-  let text = '', offset: number | null = 0
-  while (offset !== null) {
-    const page = await read(preview.previews[1]!.read, { offset, limit: 8000 }) as { text: string; next_offset: number | null }
-    text += page.text; offset = page.next_offset
+  // `prompts/preview` takes the configuration itself, not the save request's `{ config, baseRevision }` wrapper.
+  const save = async (args: Record<string, unknown>) => {
+    const result = await h.api('POST', 'prompts/preview', args.preview ? args.config : args)
+    if (result.status !== 200) throw new Error(JSON.stringify(result.body))
+    return result.body
   }
-  expect(text).toContain('## Ticket scope\nFinish what was asked.')
+  const config = { ...h.runtime.prompts.current().config, scope: 'Finish what was asked.' }
+  // The preview composes both roles' prompts from the configuration and saves nothing.
+  const preview = await save({ config, preview: true }) as { orchestrator: string; worker: string }
+  expect(Object.keys(preview)).toEqual(expect.arrayContaining(['orchestrator', 'worker']))
+  expect(preview.worker).toContain('## Ticket scope\nFinish what was asked.')
+  expect(preview.orchestrator).not.toContain('Finish what was asked.')
   expect(h.runtime.prompts.current().revision).toBe(0)
-  await expect(save({ config })).rejects.toThrow('baseRevision')
-  expect(await save({ config, baseRevision: 0 })).toMatchObject({ revision: 1 })
+  expect((await h.api('PUT', 'prompts', { config })).status).toBe(400)
+  expect((await h.api('PUT', 'prompts', { config, baseRevision: 0 })).body).toMatchObject({ revision: 1 })
 })
 
 it('releases the tools it registered for a Session once its agent is disposed, and leaves the other Sessions\' tools', async () => {
@@ -404,7 +408,7 @@ it('shows a candidate with its thread\'s tickets open first, the tickets it reac
   const a = first.ticket
   // Requests on its thread reach its worker, which hands back what is not its own; the main Session then routes them.
   const handBack = async (id: string) => {
-    await h.runTool(first.sessionId, 'orchestrator_trigger_handback', { trigger_id: id, reason: 'Another change.' })
+    await h.runTool(first.sessionId, 'orchestrator_report', { state: 'progress', summary: 'x', threads: [{ handback: id, reason: 'Another change.' }] })
     await h.runtime.pump(); await h.runtime.idle()
   }
   const second = feishu('2', '@bot 另一个问题', { root_id: 'om_1' })
@@ -452,35 +456,44 @@ it('relays a worker\'s report with its ticket card and the start of its summary,
 })
 
 it('tells the main Session of the settings, prompts, requeues and unsubscriptions others made, never of its own', async () => {
-  const save = (args: Record<string, unknown>) => h.runTool(h.runtime.masterId, 'orchestrator_settings_save', args)
   const evaluation = h.runtime.store.settings().eval
   await h.runtime.settings.save('eval', { ...evaluation, mode: 'observe' }, h.runtime.store.blockRevision('eval'), 'panel')
   await h.runtime.idle()
   expect(notices().at(-1)).toEqual({ settings_saved: 'eval', changed: ['eval.mode'], read: 'settings/eval' })
   const before = notices().length
-  expect(await save({ block: 'eval', value: { ...evaluation, mode: 'auto' }, revision: h.runtime.store.blockRevision('eval') })).not.toHaveProperty('context_delivery')
+  // The agent no longer holds settings, prompts, requeue or unsubscribe tools: the panel is where a human changes those, and
+  // its own writes reach the main Session as a notice of what changed, never as something the agent did to itself.
+  await h.api('PUT', 'settings/eval', { value: { ...evaluation, mode: 'auto' }, revision: h.runtime.store.blockRevision('eval') })
   const config = { ...h.runtime.prompts.current().config, scope: 'Finish what was asked.' }
-  expect(await h.runTool(h.runtime.masterId, 'orchestrator_prompts_save', { config, baseRevision: 0 })).not.toHaveProperty('context_delivery')
+  await h.api('PUT', 'prompts', { config, baseRevision: 0 })
   await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const thanks = feishu('5', '@bot 谢谢')
   h.runtime.receive(thanks); await h.runtime.idle()
   await h.route({ kind: 'ignore', trigger_id: thanks.id, reason: 'thanks' })
-  expect(await h.runTool(h.runtime.masterId, 'orchestrator_trigger_requeue', { trigger_id: thanks.id })).toEqual({ queued: true })
-  expect(await h.runTool(h.runtime.masterId, 'orchestrator_thread_unsubscribe', { thread: `feishu:${CHAT}:om_1` })).toEqual({ removed: true, thread: `feishu:${CHAT}:om_1` })
+  expect((await h.api('POST', `triggers/${encodeURIComponent(thanks.id)}/requeue`)).status).toBe(200)
   await h.runtime.idle()
-  expect(notices().slice(before).filter(notice => !('ticket_ended' in notice))).toEqual([])
+  // These were written outside the agent — a human in the panel — so each reaches the main Session once, and the agent's own
+  // work (the route below) adds nothing on top of them.
+  const told = notices().filter(notice => !('ticket_ended' in notice))
+  // Each change made outside the agent reaches the main Session exactly once: the eval block, the prompts, and the requeue.
+  expect(told.filter(notice => 'settings_saved' in notice)).toHaveLength(1)
+  expect(told.filter(notice => 'prompt_config_saved' in notice)).toHaveLength(1)
+  expect(told.filter(notice => 'trigger_requeued' in notice)).toHaveLength(1)
+  expect(told).toHaveLength(3)
 })
 
 it('answers a policy sync with the counts and what changed, not the whole list', async () => {
   vi.mocked(Commands.prototype.lark).mockResolvedValue({ users: [{ member_id: 'ou_alice', name: 'Alice' }, { member_id: 'ou_bob', name: 'Bob' }], has_more: false })
-  expect(await h.runTool(h.runtime.masterId, 'orchestrator_policy_sync', { source: 'feishu' })).toEqual({ source: 'feishu', allowed: 2, added: ['Bob'], removed: [] })
+  const result = await h.api('POST', 'policy-sync/feishu')
+  expect(result.status).toBe(200)
+  expect((result.body as { policy: { allowed: { id: string }[] } }).policy.allowed.map(item => item.id)).toEqual(['ou_alice', 'ou_bob'])
 })
 
 it('shows an Executor Session no id it cannot read: no Decision, no other ticket, no Trigger its ticket did not reach', async () => {
   const { ticket, trigger, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const another = feishu('2', '@bot 再修一个', { root_id: 'om_1' })
   h.runtime.receive(another); await h.runtime.idle()
-  await h.runTool(sessionId, 'orchestrator_trigger_handback', { trigger_id: another.id, reason: 'Another fix.' })
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'x', threads: [{ handback: another.id, reason: 'Another fix.' }] })
   const other = await h.acceptedTicket(another)
   const worker = (resource: string) => h.runTool(sessionId, 'orchestrator_read', { resource })
   const thread = await worker(`thread/feishu:${CHAT}:om_1`)
@@ -499,7 +512,7 @@ it('shows an Executor Session no id it cannot read: no Decision, no other ticket
 it('marks the threads a worker follows for context apart from those a Source bound its ticket to', async () => {
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   h.runtime.engine.bindThread(ticket.id, { source: 'github', id: '12' }, true)
-  await h.runTool(sessionId, 'orchestrator_thread_follow', { thread: 'github:9', reason: 'The Issue it fixes.' })
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'x', threads: [{ follow: 'github:9', reason: 'The Issue it fixes.' }] })
   const { threads } = await read(`ticket/${ticket.id}`) as { threads: { thread: string }[] }
   expect(threads).toEqual(expect.arrayContaining([{ thread: `feishu:${CHAT}:om_1` }, { thread: 'github:12', bound: true }, { thread: 'github:9', context: true }]))
   expect(threads).toHaveLength(3)

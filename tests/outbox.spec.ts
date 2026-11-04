@@ -40,3 +40,20 @@ it('keeps a message for a Source that is not installed waiting, and sends it onc
   await at(5000)
   expect([h.runtime.outbox.status('waiting'), sent.map(message => message.id)]).toEqual(['sent', ['waiting']])
 })
+
+it('does not write into a direct chat whose peer the deployment does not serve, and settles it as ignored', async () => {
+  // A direct chat is this account and one person: a reply there reaches that person, so it is only allowed when the Policy
+  // serves them. The conversation stays as it is rather than retrying, because no retry makes them a member.
+  const sent: OutboundMessage[] = []
+  h.runtime.sources.register({ kind: 'probe', title: { zh: '探针', en: 'Probe' }, description: { zh: '', en: '' }, health: [],
+    schema: z.object({}).strict(), fields: [], channel: { send: async (_host, message) => { sent.push(message); return 'sent' },
+      link: () => ({ url: '', label: { zh: '探针', en: 'Probe' } }) } })
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources, probe: { allowed: [{ id: 'SERVED' }] } } } })
+  const direct = (peer: string) => ({ source: 'probe', thread: `probe:${peer}`, address: { direct: 'true', peerOpenId: peer } })
+  h.runtime.outbox.send({ id: 'unserved', channel: direct('STRANGER'), text: 'hello', kind: 'reply' })
+  h.runtime.outbox.send({ id: 'served', channel: direct('SERVED'), text: 'hello', kind: 'reply' })
+  await h.runtime.sendReplies()
+  expect([h.runtime.outbox.status('unserved'), h.runtime.outbox.status('served')]).toEqual(['dropped', 'sent'])
+  expect(sent.map(message => message.id)).toEqual(['served'])
+})

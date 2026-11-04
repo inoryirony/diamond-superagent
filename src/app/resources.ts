@@ -1,6 +1,7 @@
 /** Serves paginated context resources to orchestrator_read so large bodies stay out of model prompts until requested. */
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { UserError, key, latestReport, reached, reportHistory, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
+import { UserError, key, latestReport, reached, reportHistory, runningAssignment, threadKey, type Ticket, type Trigger, type WorkerRecord }
+  from '../core/index.ts'
 import { batchOf, inputMessage, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { readGithub } from '../sources/github-read.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
@@ -50,6 +51,8 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'ticket/<id>/inputs', holds: 'its inputs, newest first', executor: true },
   { name: 'ticket/<id>/result', holds: 'its latest report', executor: true },
   { name: 'ticket/<id>/report/<id>', holds: 'the report of one of its assignments', executor: true },
+  { name: 'ticket/<id>/retry/<id>', holds: 'the upstream error of an assignment that is retrying, whole, and when it tries again', executor: true },
+  { name: 'ticket/<id>/worker/<index>', holds: 'what one earlier worker generation found: assignments, reports, last turns', executor: true },
   { name: 'ticket/<id>/transcript', holds: 'its Executor Session\'s messages, newest first', executor: true },
   { name: 'ticket/<id>/message/<n>', holds: 'one message of that transcript', executor: true },
   { name: 'ticket/<id>/input/<id>', holds: 'one input it was delivered', executor: true },
@@ -57,12 +60,12 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
     executor: true },
   { name: 'settings', holds: 'settings by block, each with the revision a save names: the small blocks whole, the Policy and the Source '
     + 'instances summarized' },
-  { name: 'settings/<block>', holds: 'one settings block whole, as orchestrator_settings_save takes it: policy, eval, executor, pause or '
+  { name: 'settings/<block>', holds: "one settings block whole, as the panel's settings save takes it: policy, eval, executor, pause or "
     + 'source:<id>' },
   { name: 'prompts', holds: 'the prompt revision each Session reads, the skills, and the saved versions' },
   { name: 'prompts/<revision>', holds: 'one prompt version by number, or current, the one the Session works under', executor: true },
   { name: 'prompts/defaults', holds: 'the built-in prompt configuration, and the built-in parts by the key an override names' },
-  { name: 'prompt-preview/<id>', holds: 'a composed prompt that orchestrator_prompts_save previewed' },
+  { name: 'prompt-preview/<id>', holds: "a composed prompt the panel's prompt preview rendered" },
   { name: 'models', holds: 'model providers, the DSH default and each role\'s model' },
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
@@ -132,6 +135,34 @@ const triggerLine = (trigger: Trigger) => ({ trigger_id: trigger.id, actor: trig
   preview: preview(trigger.text), chars: trigger.text.length, read: `trigger/${trigger.id}` })
 async function transcript(host: ResourceHost, ticketId: string) {
   return (await host.context.sessionController.inspect(workerSessionId(ticketId) as SessionId)).events
+}
+/** How many characters of a generation's transcript one read renders; the rest is paged with `offset`. */
+const WORKER_CHARS = 24_000
+/**
+ * Renders one worker generation's Session as a summary a fresh generation reads instead of its whole history: what it worked on,
+ * what it reported, and the turns it took. A Session this installation no longer has renders the record's own facts.
+ */
+async function workerTranscript(host: ResourceHost, ticket: Pick<Ticket, 'id' | 'assignments'>, index: number,
+  record: WorkerRecord): Promise<string> {
+  const assignments = ticket.assignments.filter(item => item.worker === index)
+  const facts = [`worker generation ${index}, kept from ${record.from}`
+    + (record.closed ? `, closed as ${record.closed} at ${record.closedAt}` : ', still the active generation')
+    + `; it served ${assignments.length} assignment(s)`]
+  for (const assignment of assignments) {
+    const report = reportHistory(assignment).at(-1)
+    facts.push(`- assignment ${assignment.id.slice(0, 8)} ${assignment.state}${report ? `, reported ${report.state}: ${preview(report.summary)}` : ''}`)
+  }
+  try {
+    const events = (await host.context.sessionController.inspect(workerSessionId(ticket.id, index) as SessionId)).events
+    const turns = events.flatMap((event, position) => event.type === 'assistant/message' && event.data.message.content
+      ? [{ at: event.time, said: event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join(' '), position }] : [])
+    const recent = turns.slice(-12)
+    const lines = recent.map(turn => `${stamp(new Date(turn.at).toISOString())} ${turn.said.slice(0, 600) || '[no text]'}`)
+    return `${facts.join('\n')}\n\nlast ${recent.length} of ${turns.length} assistant messages:\n${lines.join('\n')}`
+      .slice(0, WORKER_CHARS)
+  } catch {
+    return facts.join('\n')
+  }
 }
 
 /** How many messages before a trigger its live history shows at least, and how much of each. */
@@ -447,7 +478,20 @@ const ROUTES: readonly Route[] = [
       // The ledger's last entry carries what a ready report showed; the mirror `report` keeps only its summary.
       const evidence = reportHistory(assignment).at(-1)?.evidence
       body = evidence?.length ? `${report.summary}\n\nEvidence:\n${evidence.map(item => `- ${item.what}: ${item.result}`).join('\n')}` : report.summary
-    } else if (part !== undefined) throw new Error('Unknown context resource')
+    } else if (section === 'retry' && part) {
+      // The upstream's own words, whole: a truncated provider error is what made an outage look like a stuck ticket.
+      const assignment = ticket.assignments.find(item => item.id === part)
+      if (!assignment?.retry) throw new Error('Unknown assignment retry')
+      const { attempts, at, nextAt, backoffMs, error } = assignment.retry
+      body = `attempt ${attempts} at ${at}, next in ${Math.round(backoffMs / 1000)}s (${nextAt})\n\n${error}`
+    } else if (section === 'worker' && part) {
+      // What one worker generation found, as its own Session recorded it. A fresh generation reads the work before it here
+      // instead of carrying that Session's whole history, which is exactly what grew past what a single read needs.
+      const index = Number(part)
+      const record = ticket.workers?.find(item => item.index === index)
+      if (!record || !Number.isInteger(index)) throw new Error('Unknown worker generation')
+      body = await workerTranscript(host, ticket, index, record)
+    } else if (section === 'worker') throw new Error('A worker generation needs its index: ticket/<id>/worker/<index>')
     else if (section === 'assignment') body = ticket.execution?.assignment ?? ''
     else if (section === 'result') body = latestReport(ticket)?.summary ?? ''
     else if (section === 'transcript') {

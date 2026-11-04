@@ -19,6 +19,7 @@ export const REASONS = {
   hostRestarted: 'dsh-superagent restarted',
   stopUnknown: 'Stop target is unknown or already ended',
   stopNotExplicit: 'A stop needs an explicit request from a sender on the list',
+  operatorForUnlistedPeer: 'The operator\'s own message, sent to somebody this deployment does not serve',
   directionUnsettled: 'Implementation intent or target direction is not established, or a product/design decision is still required',
   noRuleMatched: 'No enabled admission rule matched',
   ignoredFromCard: 'Ignored from its card, without a rule assessment',

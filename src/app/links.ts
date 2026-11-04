@@ -15,6 +15,11 @@ export interface LinkHost {
   readonly commands: Commands
   readonly sources: SourceRegistry
   readonly lifetime: AbortSignal
+  /**
+   * The Eval's thread snapshot, delivered with its card. `docs/001` enumerates an Eval's input, so the whole tuple arrives at
+   * once: a Session that had to fetch half of it could judge two messages of the same lane on different facts.
+   */
+  window?(evalId: string, trigger: Trigger): Promise<unknown>
 }
 
 /** Resolves and caches a trigger's external message URL, falling back to a readable resource path when lookup fails. */
@@ -71,6 +76,9 @@ export async function candidateCard(host: LinkHost, candidate: Candidate) {
     ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
     ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(candidate.tickets),
     ...(delivered.length ? { delivered_to: delivered } : {}), ...(referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {}),
+    // The Eval's whole tuple arrives with the card: `docs/001` enumerates the input, and a Session that has to fetch half of it
+    // is judging facts a second Session may never load.
+    ...(host.window ? { window: await host.window(candidate.evalId, primary) } : {}), policy_version: candidate.policyVersion,
     next_action: candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'
-      : 'Ignore it with orchestrator_route if the card shows it touches no enabled rule; else assess it with orchestrator_eval, orchestrator_eval_read, then orchestrator_eval_decide.' }
+      : 'Ignore it with orchestrator_route kind=ignore if the card shows it touches no enabled rule; else judge it with kind=assess, whose assessment carries every rule and the direction.' }
 }

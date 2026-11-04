@@ -342,6 +342,38 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.tickets.open = []; server.person = server.person.filter(ticket => ticket.id !== params.id)
     return { stopped: true }
   } },
+  'POST tickets/:id/note': { body: true, answer: ({ params, body }) => {
+    if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
+    return (body as { text: string }).text.trim() ? { noted: true } : refuse(400, 'Invalid settings: text')
+  } },
+  'POST tickets/:id/attach': { body: true, answer: ({ params, body }) => {
+    if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
+    return (body as { trigger_id: string }).trigger_id.trim() ? { attached: true } : refuse(400, 'Invalid settings: trigger_id')
+  } },
+  'POST tickets/:id/hold': { body: true, answer: ({ params, body }) => {
+    if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
+    return (body as { options: unknown[] }).options.length >= 2 ? { held: true, hold_id: `hold-${params.id}` }
+      : refuse(400, 'A hold names at least two options')
+  } },
+  'POST tickets/:id/release': { body: true, answer: ({ params, body }) => {
+    if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
+    return (body as { resolution: string }).resolution.trim() ? { released: true } : refuse(400, 'Invalid settings: resolution')
+  } },
+  'POST tickets/:id/reply': { body: true, answer: ({ params, body }) => {
+    if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
+    return (body as { text: string }).text.trim() ? { reply_id: `reply-${params.id}`, status: 'pending', reused: false }
+      : refuse(400, 'Invalid settings: text')
+  } },
+  'PATCH tickets/:id': { body: true, answer: ({ params, body }) => {
+    const ticket = ticketOf(params.id)
+    if (!ticket) return refuse(404, 'Ticket not found')
+    const { title } = body as { title?: string }
+    if (title !== undefined) {
+      if (!title.trim()) return refuse(400, 'A ticket needs a non-empty title')
+      ticket.title = title
+    }
+    return { updated: true }
+  } },
   'POST executor/pause': { body: true, answer: ({ body }) => {
     server.settings = { ...server.settings, paused: body.paused }
     server.revisions.pause = (server.revisions.pause ?? 0) + 1

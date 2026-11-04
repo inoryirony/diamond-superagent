@@ -41,7 +41,8 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
     withdraw: id => { withdrawn.push(id) },
   }
   const engine = new Engine({ repo, scope, policy: () => policy, assessor, executor, outbox: queued,
-    ...emit ? { emit } : {}, ...prepareTicket ? { prepareTicket } : {}, now: () => new Date(Date.UTC(2026, 8, 23, 0, 0, clock)).toISOString() })
+    ...emit ? { emit } : {}, ...prepareTicket ? { prepareTicket } : {},
+    now: () => new Date(Date.UTC(2026, 8, 23, 0, 0, clock)).toISOString() })
   /** Simulate the executor starting queued assignments (unless `launch` is false) and delivering pending ticket inputs. */
   function settle({ launch = true } = {}) {
     for (;;) {
@@ -736,8 +737,8 @@ describe('interrupted assignments', () => {
     h.engine.receive(trigger('3', { threads: [{ source: 'chat', id: 't2' }] }))
     vi.mocked(h.executor.start).mockClear(); vi.mocked(h.executor.deliver).mockClear()
     // The Executor reports each Assignment that was running; a fact about one that no longer runs is dropped.
-    for (const id of [interrupted, waiting]) h.engine.assignmentInterrupted(id, runningAssignment(h.repo.tickets.get(id)!)!.id)
-    h.engine.assignmentInterrupted(interrupted, first.id)
+    for (const id of [interrupted, waiting]) h.engine.assignmentInterrupted(id, runningAssignment(h.repo.tickets.get(id)!)!.id, true)
+    h.engine.assignmentInterrupted(interrupted, first.id, true)
     const ticket = h.repo.tickets.get(interrupted)!
     expect(ticket.assignments).toEqual([expect.objectContaining({ id: first.id, state: 'ended', endedReason: 'hostRestarted' }),
       expect.objectContaining({ state: 'pending' })])
@@ -747,6 +748,20 @@ describe('interrupted assignments', () => {
     // A worker that waits keeps its Session and gets what waits for it.
     expect(h.repo.tickets.get(waiting)!.assignments).toHaveLength(1)
     expect(h.executor.deliver).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: waiting }), expect.objectContaining({ state: 'running' }))
+  })
+  it('starts again a worker whose Session the restart ended, even though its last report said waiting', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.report(ticketId, { state: 'waiting', summary: 'nothing to do until the MR is merged' })
+    const before = h.repo.tickets.get(ticketId)!.assignments
+    vi.mocked(h.executor.start).mockClear()
+    // No `alive`: the Executor cancelled the Session, so a waiting report cannot keep the ticket on a dead worker.
+    h.engine.assignmentInterrupted(ticketId, runningAssignment(h.repo.tickets.get(ticketId)!)!.id)
+    const after = h.repo.tickets.get(ticketId)!
+    expect(after.assignments).toHaveLength(before.length + 1)
+    expect(after.assignments.at(-2)).toMatchObject({ state: 'ended', endedReason: 'hostRestarted' })
+    expect(after.assignments.at(-1)).toMatchObject({ state: 'pending' })
+    expect(h.executor.start).toHaveBeenCalledOnce()
   })
   it('starts again a worker that reported but then got a person\'s message, which it was working on', () => {
     const h = harness()
@@ -1158,6 +1173,45 @@ describe('ticket commands', () => {
     expect(retried.assignments).toEqual([expect.objectContaining({ state: 'ended', endedReason: 'retried' }), expect.objectContaining({ state: 'pending' })])
     expect(h.executor.stop).toHaveBeenCalledOnce()
     expect(h.executor.start).toHaveBeenLastCalledWith(expect.objectContaining({ id: ticketId }), retried.assignments[1])
+  })
+})
+describe('worker generations', () => {
+  /** Retry a ticket until it has had `count` Assignments, ending each with a blocked report so the next retry is allowed. */
+  const retries = (h: ReturnType<typeof harness>, ticketId: string, count: number) => {
+    for (let index = 0; index < count; index++) {
+      h.engine.report(ticketId, { state: 'blocked', summary: `blocked ${index}` })
+      h.engine.retryTicket(ticketId); h.settle()
+    }
+    return h.repo.tickets.get(ticketId)!
+  }
+  it('reuses one worker Session for three Assignments, then opens a fresh generation for the fourth', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    // The accept's own Assignment is the first: two retries reach three, all in generation 1.
+    const third = retries(h, ticketId, 2)
+    expect(third.assignments.map(item => item.worker)).toEqual([1, 1, 1])
+    expect(third.workers).toEqual([expect.objectContaining({ index: 1 })])
+    // The fourth starts a fresh Session, and the one before it closes as spent rather than as a failure.
+    const fourth = retries(h, ticketId, 1)
+    expect(fourth.assignments.map(item => item.worker)).toEqual([1, 1, 1, 2])
+    expect(fourth.workers).toEqual([expect.objectContaining({ index: 1, closed: 'rounds' }), expect.objectContaining({ index: 2 })])
+    expect(fourth.workers![0]!.closedAt).toBeTruthy()
+  })
+  it('moves a running Assignment onto the next generation without ending it, when its Session overflows', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    const running = runningAssignment(h.repo.tickets.get(ticketId)!)!
+    // An overflow is the Session's verdict, not the work's: the Assignment keeps running in the generation after it.
+    expect(h.engine.rotateWorker(ticketId, running.id, 'overflow')).toBe(2)
+    const ticket = h.repo.tickets.get(ticketId)!
+    const moved = ticket.assignments.find(item => item.id === running.id)!
+    expect(moved).toMatchObject({ state: 'running', worker: 2 })
+    expect(moved.report).toBeUndefined()
+    expect(ticket.workers).toEqual([expect.objectContaining({ index: 1, closed: 'overflow' }), expect.objectContaining({ index: 2 })])
+    // A second overflow in the generation it moved to opens the next one: that Session's history is what overflowed too.
+    expect(h.engine.rotateWorker(ticketId, running.id, 'overflow')).toBe(3)
+    expect(h.repo.tickets.get(ticketId)!.workers).toEqual([expect.objectContaining({ index: 1, closed: 'overflow' }),
+      expect.objectContaining({ index: 2, closed: 'overflow' }), expect.objectContaining({ index: 3 })])
   })
 })
 describe('failed deliveries', () => {
@@ -1654,5 +1708,40 @@ describe('ignores from the card', () => {
     // Accepting an inferred candidate still takes an assessment's matched rules.
     h.engine.receive(trigger('5', { actor: guest })); h.engine.reevaluate('5'); h.pump()
     expect(() => h.engine.decide('5', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'chat' })).toThrow(new UserError('notExplicit'))
+  })
+})
+
+describe('a hold reminder keeps working hours', () => {
+  /** The hold's events the harness recorded. */
+  const due = (h: ReturnType<typeof harness>, ticketId: string) => h.repo.tickets.get(ticketId)!.hold!
+  it('moves a due time at night to 09:00 local, without asking anybody', () => {
+    const events: { type: string; data: Record<string, unknown> }[] = []
+    const h = harness({}, { emit: event => events.push(event) })
+    const ticketId = accepted(h).ticketId!
+    // The harness clock starts at 2026-09-23T00:00Z, which is 08:00 in Shanghai: an hour before the working day.
+    h.engine.hold(ticketId, { question: 'A or B?', options: [{ id: 'a', text: 'A', by: 'Alice' }, { id: 'b', text: 'B', by: 'Bob' }],
+      dueAt: '2026-09-23T00:00:00.000Z' })
+    expect(due(h, ticketId).dueAt).toBe('2026-09-23T01:00:00.000Z')
+    h.pump()
+    expect(events.filter(event => event.type === 'ticket.holdDue')).toEqual([])
+  })
+
+  it('asks once in the working day and not again that night', () => {
+    const events: { type: string; data: Record<string, unknown> }[] = []
+    const h = harness({}, { emit: event => events.push(event) })
+    const ticketId = accepted(h).ticketId!
+    // 10:00 Shanghai, inside the day, due now.
+    h.engine.hold(ticketId, { question: 'A or B?', options: [{ id: 'a', text: 'A', by: 'Alice' }, { id: 'b', text: 'B', by: 'Bob' }],
+      dueAt: '2026-09-23T02:00:00.000Z' })
+    h.tick(2 * 60 * 60)
+    h.pump()
+    expect(events.filter(event => event.type === 'ticket.holdDue')).toHaveLength(1)
+    // The next reminder is a further wait away, and it is in the working day rather than the same evening.
+    const reminded = due(h, ticketId)
+    expect(reminded.remindedAt).toBeDefined()
+    expect(reminded.dueAt! > reminded.remindedAt!).toBe(true)
+    h.tick(60 * 60)
+    h.pump()
+    expect(events.filter(event => event.type === 'ticket.holdDue')).toHaveLength(1)
   })
 })

@@ -222,6 +222,15 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       const scope = listened(sources, trigger.source, trigger.meta)
       const row = scope.listened ? scope.row : undefined
       const recorded = { source: trigger.source, scope: trigger.meta, ...row === undefined ? {} : { row }, ...allowed ? { sender: senderName(allowed) } : {} }
+      // The operator writing to someone is not the operator writing to the agent: his direct message is addressed to that
+      // person, so it carries no authority of its own. It is admitted only when the person he wrote to is on the list, because
+      // then the conversation is one this deployment already answers, and his words there are its directions.
+      if (trigger.meta.forPeer === true) {
+        const peer = typeof trigger.meta.peerOpenId === 'string' ? trigger.meta.peerOpenId : ''
+        const served = !!peer && settings.policy.sources[trigger.source]?.allowed?.some(item => item.id === peer)
+        if (!served) return { admissible: false, reason: 'operatorForUnlistedPeer' }
+        return { admissible: true, strength: 'explicit', basis: { ...recorded, via: 'addressed', addressed: 'direct' } }
+      }
       if (allowed && trigger.addressed) return { admissible: true, strength: 'explicit', basis: { ...recorded, via: 'addressed', addressed: trigger.addressed } }
       const cell = admissionCell(!!allowed, !!trigger.addressed)!
       // Unaddressed messages only use the admission table when the Source observes all messages in that scope.

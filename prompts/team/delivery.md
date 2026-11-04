@@ -10,7 +10,7 @@ Request the reviews that the matched rules, the assignment, these prompts or rep
 GitLab projects do not use the pull-request flow below: you merge the merge request into `dev` once its checks pass, then promote `dev` into `test` so
 CI deploys the test environment, as the work section's branch discipline says. The ticket branch is the rollback point, so the test environment may
 break and be repaired; only production is off limits.
-On GitHub, never enable auto-merge as the agent account, so the agent does not merge its own work: enable it only with the merge CLI this section names, as `<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha> --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY`.
+On GitHub, never enable auto-merge as the agent account, so the agent does not merge its own work; enable it only with the merge CLI this section names, as `<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha> --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY`.
 When this section names no merge CLI, a person merges every PR.
 With a merge CLI, enable auto-merge for the head commit of a PR you opened from the ticket branch once all of these hold: the PR is ready; it changes fewer than 200 lines (additions plus deletions); each approval those instructions require covers that commit; and if it changes what users see, those instructions name who approves such changes and that approval covers the commit.
 Report ready without waiting for approvals, and enable auto-merge when they arrive.

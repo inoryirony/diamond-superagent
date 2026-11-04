@@ -97,6 +97,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 - [009 Lanes and conflicts](docs/009-lanes-and-conflicts.md): one Session per conversation, the ticket board as the only channel between them, and holds on contradictory directions
+- [010 Tools and hooks](docs/010-tools-and-hooks.md): target tool set and DSH hook per role, and why a rule enforced by a tool outlives one written in a prompt
 
 ## Development
 

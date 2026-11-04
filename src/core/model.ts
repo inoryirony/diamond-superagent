@@ -219,16 +219,52 @@ export type AssignmentState = 'pending' | 'running' | 'ended'
  * ready (`ready`), a person must act to unblock or recover it (`blocked` or `failed`), or nothing is left to do (`dropped`).
  */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
+/**
+ * What a result changed, and so who reads it. `code` is the one a Reviewer reviews: a change whose correctness a second reader
+ * establishes from the diff, its tests and the ticket. `data` reports what a read of data, logs or a database showed; `verify`
+ * reports what running an existing check showed; `docs` reports prose that changed. The last three have no code to judge, so
+ * they reach a person directly and spend no review round.
+ */
+export type WorkKind = 'code' | 'data' | 'verify' | 'docs'
+/** Whether a Reviewer reads a result of this kind: only a kind that changed code has something for it to judge. */
+export const reviewedWork = (work: WorkKind | undefined): boolean => work === undefined || work === 'code'
 /** One report in an Assignment's ledger, with its author: the worker, or the host when it closed a turn on the worker's behalf. */
 export interface ReportEntry { by: 'worker' | 'host'; state: ReportState; summary: string; at: string
   /** What a ready report showed: the commands run, queries made or files read after the last change, and what each printed. */
-  evidence?: ReportEvidence[] }
+  evidence?: ReportEvidence[]
+  /** What kind of work the result was (see `WorkKind`); an entry written before reports carried it has none. */
+  work?: WorkKind }
 /** One check a report names as evidence: what was done, and what it actually showed. */
 export interface ReportEvidence { what: string; result: string }
+/**
+ * One worker Session a ticket used. A worker Session carries its context forward, so it is reused while that helps and replaced
+ * once it stops: after `WORKER_REUSES` Assignments, whose history a fresh read of the ticket costs less than, or after a turn the
+ * provider failed for want of context. `index` numbers them from 1, and the Executor names the Session after it.
+ */
+export interface WorkerRecord {
+  /** Which generation of worker this is, from 1. */
+  index: number
+  from: string
+  /** How it stopped being the ticket's worker: it served its Assignments, or a turn ran out of context. */
+  closed?: 'rounds' | 'overflow'
+  closedAt?: string
+}
+/**
+ * How many Assignments one worker Session serves before a fresh one replaces it. Retries, restarts and review returns rewrite the
+ * same work, so the history grows with each Assignment; three is where reading the ticket afresh is cheaper than the history.
+ */
+export const WORKER_REUSES = 3
+/** The worker Session that runs a ticket's next Assignment: its newest, unless that one is closed. */
+export const activeWorker = (ticket: Pick<Ticket, 'workers'>): WorkerRecord | undefined =>
+  ticket.workers?.at(-1)?.closed ? undefined : ticket.workers?.at(-1)
+/** The worker Session an Assignment runs in: its named generation, or 1 for one recorded before generations existed. */
+export const workerOf = (assignment: Pick<Assignment, 'worker'>): number => assignment.worker ?? 1
 /** Binding between a ticket and one executor instance. */
 export interface Assignment {
   id: string
   state: AssignmentState
+  /** The ticket's worker Session that runs it (see `WorkerRecord.index`), so a reader tells which history it starts from. */
+  worker?: number
   createdAt: string
   startedAt?: string
   endedAt?: string
@@ -251,6 +287,26 @@ export interface Assignment {
    * a retry or the orchestrator started, which begins a new attempt with its own rounds.
    */
   revises?: true
+  /**
+   * Where the last turn stood when the provider or the network failed it: how many attempts this Assignment has made, the
+   * full error the upstream returned, and when it will try again. It never gives up — an upstream outage is not the work's
+   * verdict — so this is how a person sees that a ticket waits on the provider rather than on the work.
+   */
+  retry?: AssignmentRetry
+}
+
+/** A turn the upstream failed, and the attempt now waiting out its backoff before trying again. */
+export interface AssignmentRetry {
+  /** How many times this Assignment has retried after a passing failure; the first retry is 1. */
+  attempts: number
+  /** The error exactly as the upstream or the network returned it, kept whole: cutting it is what makes an outage unreadable. */
+  error: string
+  /** When this attempt was recorded. */
+  at: string
+  /** When the next attempt runs. */
+  nextAt: string
+  /** How long the backoff before that attempt is, so a person tells a fast retry from one backing off for an hour. */
+  backoffMs: number
 }
 
 export type TicketInput =
@@ -360,6 +416,11 @@ export interface Ticket {
   reviews?: TicketReview[]
   /** Set when a ready result ended the ticket although reviews are on and its rounds were spent, so no review judged it. */
   unreviewed?: true
+  /**
+   * The worker Sessions it used, oldest first. The newest runs its next Assignment; the ones before it are kept as the reading of
+   * the work they did, which a fresh worker reads through `ticket/<id>/worker/<index>` instead of carrying their whole history.
+   */
+  workers?: WorkerRecord[]
 }
 
 /** How a review of a ticket's result ended: the work passed it, or it sent the work back with findings. */

@@ -5,8 +5,8 @@ Subjective style or comprehension feedback is not permission to choose a visual 
 A separately established spacing defect cannot authorize adjacent restyling.
 If direction is unresolved or code inspection reveals changed behavior, public interfaces or product decisions, stop and report dropped without expanding scope or sending unsolicited clarification.
 
-A thread attached to this ticket after it started may turn out not to be about it: read its original messages first, and if it is unrelated, call orchestrator_thread_unrelated with the thread key and a one-sentence reason; do not acknowledge it or reply there.
-Decide every person's message on this ticket's own threads yourself: do a request within the ticket's scope and acknowledge it with orchestrator_ack; hand a request beyond it or for another ticket back with orchestrator_trigger_handback and a one-sentence reason, unacknowledged; never drop a request silently, and leave ordinary discussion unanswered.
+A thread attached to this ticket after it started may turn out not to be about it: read its original messages first, and if it is unrelated, say so in your next report with `threads: [{ thread, reason }]` and a one-sentence reason; do not acknowledge it or reply there.
+Decide every person's message on this ticket's own threads yourself: do a request within the ticket's scope and acknowledge it with orchestrator_ack; hand a request beyond it or for another ticket back in the same report as `threads: [{ handback, reason }]`, unacknowledged; follow a related thread for context as `threads: [{ follow, reason }]`. Never drop a request silently, and leave ordinary discussion unanswered.
 Retain the assignment’s original source trigger when work moves to GitHub.
 Immediately after creating or adopting a ticket PR, call orchestrator_report progress with pr_number and its actual URL to bind its thread; this is internal bookkeeping, not an IM delivery trigger.
 Continue checks and review silently until ready.
@@ -59,6 +59,7 @@ revised or gave up on the work, call orchestrator_report — `ready` for a revis
 `dev` into `test` as the branch discipline below says, and report `ready` with the checks you ran; never stop at "the MR awaits approval".
 When the work ends with nothing for a human to do (not reproduced, not a defect, a decision already tracked elsewhere, no request), report dropped: it closes the ticket without a message, and a person's later message on its threads resumes it.
 Call orchestrator_report with progress, ready, blocked, failed or dropped; include changes, tests actually run, risks, and the actual ticket PR or MR when available.
+A ready report's work kind decides who reads it. `code` (default) changed source, a test or a build config, and a Reviewer judges the diff; `data` read data, a database or logs; `verify` ran existing checks; `docs` edited prose. The last three have no diff to judge, so they reach the person without spending a review round. Never claim one of them for a code change to skip the review it needs.
 Name the change on the source control the deployment has. With a GitHub account, `pr_number` is the ticket's pull request; with a GitLab account, `mr` is
 the merge request, as its web URL or `group/project!7`. Omit both when there is none; never use a placeholder such as 1. Naming the one the
 deployment does not have is ignored.

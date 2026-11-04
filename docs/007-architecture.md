@@ -333,6 +333,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
 | `src/app/migration.ts` | The schema 12 migration: schema 10 to 11, then `mergeConversationThreads`, which folds DingTalk episode Threads into one per conversation |
 | `src/app/effects.ts` | Effects |
+| `src/app/eval-retention.ts` | `EvalRetention`: keeps the Eval Sessions a Decision can be read back from, at most `KEEP_PER_LANE` a lane, and archives the rest |
+| `src/app/turn.ts` | `holdTurn`: the `agent/turn-stopping` hook that steers once when a role's turn would close without what it owes — a worker's report, a reviewer's verdict, an Eval's decision on every trigger |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
 | `src/app/settings.ts` | Settings |
@@ -358,6 +360,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/executor.ts` | An Executor Session's tools |
 | `src/app/tools/reviewer.ts` | A Reviewer Session's tools: reading the ticket and its worker's transcript, and the verdict |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
+| `src/app/external.ts` | The loopback listener that serves the same routes outside the DSH window, so another tool can read and change the orchestrator; off unless `externalApiPort` names a port |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
@@ -366,13 +369,14 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/sources.ts` | The Source status: each Source instance's state, its last day's counts, and what it filtered and dropped in that day |
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
-| `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
+| `src/executor/dsh.ts` | The DshExecutor, which launches and wakes a ticket's worker Session by generation, rotates that Session on a context overflow rather than retrying in it, `WorkerSlots`, `ticketExecution`, `inputMessage`, `overflow`, `earlierWork` and `mandateInstructions` |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
+| `src/infra/hours.ts` | The hours a reminder may reach a person in (09:00–19:00 `Asia/Shanghai`), `nextWorkInstant`, and `localDay`, which the hold's once-a-night rule counts |
 | `src/sources/kind.ts` | The `SourceKind` protocol |
 | `src/sources/registry.ts` | `SourceRegistry` |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
@@ -467,6 +471,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
+| `tests/external.spec.ts` | The loopback listener for external tools: off at port 0, the header guard on its own port, and a taken port reported instead of thrown |
+| `tests/eval-retention.spec.ts` | Eval Session retention: the Sessions a Decision keeps readable, one per ticket and `KEEP_PER_LANE` per lane, and the sweep that archives the rest while leaving a live or refused one to the next round |
+| `tests/hours.spec.ts` | The hours a hold reminder may reach a person in: local-hour reading in the deployment's zone, `nextWorkInstant` moving a night due time to 09:00, and one night counted by the local day |
+| `tests/turn.spec.ts` | The `agent/turn-stopping` hook: one steering per turn naming what the role owes, silence once it is met, no second objection for the same assignment, and no crossing between Sessions |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |

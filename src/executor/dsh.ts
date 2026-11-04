@@ -4,9 +4,9 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
-import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
-  from '../core/index.ts'
+import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson, workerOf } from '../core/index.ts'
+import type { AssessmentOutcome, Assignment, AssignmentRetry, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger,
+  WorkerRecord } from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
@@ -20,8 +20,24 @@ import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
 const now = (): string => new Date().toISOString()
-/** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
-export const workerSessionId = (ticketId: string): string => `worker-${ticketId}`
+/**
+ * Returns the worker Session ID of `ticketId`'s `worker` generation (see `WorkerRecord`). Generation 1 keeps `worker-<ticketId>`,
+ * the name every earlier version wrote; a later generation adds its index, so the reading of the work before it stays readable.
+ */
+export const workerSessionId = (ticketId: string, worker = 1): string => worker > 1 ? `worker-${ticketId}-w${worker}` : `worker-${ticketId}`
+/** Returns the ticket ID a worker or reviewer session ID names, and that worker's generation (1 when the ID carries none). */
+export const workerOfSession = (sessionId: string): { ticketId: string; worker: number } | undefined => {
+  const match = /^worker-(.+?)(?:-w(\d+))?$/.exec(sessionId)
+  return match ? { ticketId: match[1]!, worker: match[2] === undefined ? 1 : Number(match[2]) } : undefined
+}
+/**
+ * The worker Session a ticket's work runs in now: the newest generation while it is open, else the one its next Assignment will
+ * start. A caller that has the Assignment names `assignment.worker` instead, which is what a launch already settled.
+ */
+export const workerSessionOf = (ticket: Pick<Ticket, 'id' | 'workers'>): string => {
+  const last = ticket.workers?.at(-1)
+  return workerSessionId(ticket.id, last && !last.closed ? last.index : (last?.index ?? 0) + 1)
+}
 /**
  * Returns the reviewer session ID of review `round` of a ticket (`reviewer-<ticketId>-<round>`): each review gets a Session of
  * its own, so a later round reads the result afresh instead of the reasoning of the round before.
@@ -29,7 +45,8 @@ export const workerSessionId = (ticketId: string): string => `worker-${ticketId}
 export const reviewerSessionId = (ticketId: string, round: number): string => `reviewer-${ticketId}-${round}`
 /** Returns the ticket ID for a worker or reviewer session ID, or undefined for non-ticket sessions. */
 export const ticketOfSession = (sessionId: string): string | undefined => {
-  if (sessionId.startsWith('worker-')) return sessionId.slice('worker-'.length)
+  const worker = workerOfSession(sessionId)
+  if (worker) return worker.ticketId
   const match = /^reviewer-(.+)-(\d+)$/.exec(sessionId)
   return match ? match[1] : undefined
 }
@@ -45,8 +62,25 @@ export const reviewTitle = (ticket: Pick<Ticket, 'title'>, round: number): strin
   `review ${round} ${ticket.title.replace(/\s+/g, ' ').slice(0, 40)}`
 /** Maximum runtime for a workspace prepare command. */
 const PREPARE_TIMEOUT_MS = 10 * 60_000
-/** Maximum transient retry attempts for a launch or worker turn, and the initial backoff before resuming a turn. */
-const TRANSIENT_TRIES = 3, TRANSIENT_BACKOFF_MS = 15_000
+/**
+ * The backoff after a passing failure of the provider or the network: it starts at this and doubles each attempt up to the
+ * ceiling, so a short outage retries within seconds while a long one settles at one attempt every few minutes instead of
+ * giving up. There is no attempt limit: an upstream outage says nothing about the work, so the turn waits it out and keeps
+ * trying, and a person sees the attempt count and the last error on the ticket.
+ */
+const TRANSIENT_BACKOFF_MS = 15_000, TRANSIENT_BACKOFF_MAX_MS = 5 * 60_000
+/** How much of the upstream's error is kept, in characters: enough for a full provider refusal with its request id. */
+const TRANSIENT_ERROR_CHARS = 4000
+
+/** The backoff before attempt `attempts`: doubling from the base, capped so a long outage keeps a steady, readable rhythm. */
+const backoffAfter = (attempts: number): number => Math.min(TRANSIENT_BACKOFF_MS * 2 ** (attempts - 1), TRANSIENT_BACKOFF_MAX_MS)
+
+/** What the ticket records about a turn the upstream failed, so a person sees the attempt and the provider's own words. */
+const retryState = (attempts: number, error: unknown): AssignmentRetry => {
+  const backoffMs = backoffAfter(attempts)
+  return { attempts, error: String(error).slice(0, TRANSIENT_ERROR_CHARS), at: new Date().toISOString(),
+    nextAt: new Date(Date.now() + backoffMs).toISOString(), backoffMs }
+}
 /** How long a worker's background work may run on after its turn ended before it is stopped and the worker reported waiting. */
 const BACKGROUND_LIMIT_MS = 30 * 60_000
 /** How long a host stop waits for the workers' background work to stop. */
@@ -62,6 +96,27 @@ const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ?
 class PrepareFailed extends Error {}
 const PASSING = new RegExp(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'UND_ERR', 'socket hang up', 'fetch failed',
   'network error', 'overloaded', 'rate limit', '\\b(?:408|429|50[0-4])\\b'].join('|'), 'i')
+/**
+ * True when a failed turn is a context overflow rather than a passing network or provider fault: DSH names it `pi-ai detected
+ * context overflow`, the gateway words it `Input exceeds the context limit`, and both carry `CONTEXT_WINDOW_EXCEEDED`. Retrying
+ * such a turn in the same Session can only fail again, because the history is what overflowed.
+ */
+export function overflow(error: unknown): boolean {
+  const code = (error as { code?: unknown } | undefined)?.code
+  if (typeof code === 'string' && /CONTEXT_WINDOW_EXCEEDED|CONTEXT_OVERFLOW/i.test(code)) return true
+  const text = error instanceof Error ? `${error.name} ${error.message}` : String(error)
+  return /context overflow|exceeds the context limit|context window|too many tokens/i.test(text)
+}
+/**
+ * What a fresh worker generation is told about the ones before it: one read pointer per earlier Session, so it can look up what
+ * that worker found instead of carrying its whole history. The newest earlier generation is named first, and each pointer is the
+ * ticket resource that renders that Session's transcript.
+ */
+export function earlierWork(ticket: Pick<Ticket, 'id' | 'workers'>, earlier: readonly WorkerRecord[] | undefined) {
+  if (!earlier?.length) return {}
+  return { earlier_workers: [...earlier].reverse().map(record => ({ worker: record.index, closed: record.closed ?? 'rounds',
+    read: `ticket/${ticket.id}/worker/${record.index}` })) }
+}
 /**
  * True when an error represents a transient network or model-provider failure: an HTTP 408, 429, or 5xx status, or a
  * connection that was refused, reset, timed out, or could not resolve its host.
@@ -80,7 +135,7 @@ export interface ExecutorHost {
   readonly context: Context
   /** Where the Executor and its reviewers report what happened to Assignments, reviews and Inputs. */
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
-    | 'assignmentInterrupted'>
+    | 'assignmentInterrupted' | 'rotateWorker'>
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches and input deliveries run. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
@@ -128,14 +183,10 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
     : note.trim()
   return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
 }
-/** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
-const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
-/** Returns `text` up to `limit` characters, or a truncated preview with total character count and the resource path to read the full text. */
-const capped = (text: string, limit: number, read: string) =>
-  text.length <= limit ? { text } : { text: `${text.slice(0, limit)}…`, chars: text.length, read }
 /**
- * Formats a Trigger for worker delivery: author, thread, timestamp, text up to `TRIGGER_CHARS`, source message link,
- * optional routing note, and a preview of the replied-to message when the worker has not yet seen it.
+ * Formats a Trigger for worker delivery: author, thread, timestamp, its text whole, source message link, optional routing
+ * note, and a preview of the replied-to message when the worker has not yet seen it. The text is the request: cutting it and
+ * selling the rest back through a read tool bought the worker a round trip and nothing else.
  */
 /** The sender's identity a trigger carries for the model: the display name the Source resolved (花名（真名） on DingTalk), and
  * whether he is the operator himself, whose message carries his own authority rather than a request from someone else. */
@@ -144,8 +195,9 @@ export const actorFace = (trigger: Trigger) => ({ ...(typeof trigger.meta.actor_
 
 export function triggerMessage(trigger: Trigger, link: { source_url?: string; source_url_read?: string }, note?: string, repliesTo?: Trigger) {
   return { trigger_id: trigger.id, from: trigger.actor.id, ...actorFace(trigger), thread: threadKey(trigger.threads[0]!), at: trigger.at,
-    ...capped(trigger.text, TRIGGER_CHARS, `trigger/${trigger.id}`), ...link, ...(note ? { routing_note: note } : {}),
-    ...(repliesTo ? { replies_to: { trigger_id: repliesTo.id, preview: repliesTo.text.replace(/\s+/g, ' ').slice(0, 160) } } : {}) }
+    ...link, ...(note ? { routing_note: note } : {}),
+    ...(repliesTo ? { replies_to: { trigger_id: repliesTo.id, preview: repliesTo.text.replace(/\s+/g, ' ').slice(0, 160) } } : {}),
+    text: trigger.text }
 }
 /** Formats a peer trigger from the ticket's acceptance batch with author, timestamp, 160-character preview, and read resource path. */
 export const batchLine = (trigger: Trigger) => ({ trigger_id: trigger.id, from: trigger.actor.id, ...actorFace(trigger), at: trigger.at,
@@ -276,6 +328,9 @@ export class DshExecutor implements Executor {
    */
   private async prepareDirectory(ticket: Ticket): Promise<void> {
     const directory = ticket.execution?.directory ?? ''
+    // A ticket created outside acceptance (a migrated or panel-imported one) has no Execution; running `mkdir -p ""` would fail with
+    // an unreadable `mkdir: : No such file or directory` instead of naming the real cause.
+    if (!directory) throw new PrepareFailed('The ticket has no execution directory, so nothing can be prepared; give it one before launching.')
     await mkdir(dirname(directory), { recursive: true })
     const command = this.host.store.settings().executor.prepare.trim()
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
@@ -309,7 +364,12 @@ export class DshExecutor implements Executor {
       // would treat whatever a failed prepare command left behind in the directory as a prepared workspace; instead the
       // ticket is marked failed and waits until new human input or an explicit retry arrives.
       if (this.host.closing() || error instanceof Later) throw error
-      if (!(error instanceof PrepareFailed) && this.retries(`launch:${assignmentId}`, error)) throw error
+      // A passing failure on the launch itself is recorded on the Assignment before the effect is retried, so the ticket shows
+      // the attempt and the provider's words rather than looking like a ticket that simply never started.
+      if (!(error instanceof PrepareFailed) && this.retries(`launch:${assignmentId}`, error)) {
+        this.recordRetry(ticketId, assignmentId, retryState(this.transient.get(`launch:${assignmentId}`) ?? 1, error))
+        throw error
+      }
       this.launchFailed(ticketId, assignmentId, error)
     } finally { this.slots.free(ticketId) }
   }
@@ -368,8 +428,9 @@ export class DshExecutor implements Executor {
     const trigger = input.kind === 'trigger' ? await this.triggerCard(ticket, input.triggerId, input.note) : undefined
     const message = inputMessage(input, trigger)
     if (message === undefined) return
-    const text = message.length > ASSIGNMENT_CHARS ? JSON.stringify(capped(message, ASSIGNMENT_CHARS, inputResource(ticket.id, input.id))) : message
-    await this.host.sessions.prompt(workerSessionId(ticket.id), input.id, text, 'steer', live)
+    // Delivered whole: an input is a person's request or a host notice, and a cut one sends the worker to a read tool to learn
+    // what it was already told.
+    await this.host.sessions.prompt(workerSessionId(ticket.id, workerOf(assignment)), input.id, message, 'steer', live)
   }
   /** Formats a trigger on `ticket` for the worker, including a preview of the replied-to message when the worker has not yet seen it. */
   private async triggerCard(ticket: Ticket, triggerId: string, note?: string): Promise<object | undefined> {
@@ -479,7 +540,7 @@ export class DshExecutor implements Executor {
       if (!current()) return
     }
     if (!current()) return
-    const sessionId = workerSessionId(ticket.id)
+    const sessionId = workerSessionId(ticket.id, workerOf(assignment))
     const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker')
     if (!current()) return
     // The background work of the Assignment this one replaces stops first, so its end does not clear this one's message.
@@ -489,28 +550,29 @@ export class DshExecutor implements Executor {
     // crash, where this launch's message would take it into a step beside the copy delivered next: that copy is the only one.
     for (const id of this.host.store.tickets.get(ticket.id)?.undelivered ?? []) agent.inbox.remove(this.host.sessions.promptedId(id))
     // The first message holds the assignment and the source Trigger; a later Assignment's says only what is new, unless the
-    // Session lost the first, such as when someone deleted it.
+    // Session lost the first, such as when someone deleted it, or a fresh worker generation started and must read the ticket anew.
     const first = `assignment:${ticket.id}`
     const later = ticket.assignments.length > 1
-    const told = later && await this.host.sessions.holds(sessionId, first)
+    const earlier = ticket.workers?.filter(record => record.index < workerOf(assignment)) ?? []
+    const told = later && workerOf(assignment) === 1 && await this.host.sessions.holds(sessionId, first)
     if (!current()) return
     const retried = ticket.assignments.at(-2)?.endedReason === 'retried' ? { note: RETRIED } : {}
     const assignmentText = ticket.execution?.assignment ?? ''
-    const { text: brief, chars, read } = capped(assignmentText, ASSIGNMENT_CHARS, `ticket/${ticket.id}/assignment`)
     const card = told || !source ? undefined : await this.triggerCard(ticket, source.id)
     if (!current()) return
     const batch = told ? [] : batchOf(this.host, ticket).map(batchLine)
+    // The assignment and its source arrive whole, so the worker reads the request itself rather than asking a tool for the part
+    // that was cut. The tuple is the message: nothing here is optional and nothing has to be fetched back.
     const text = told ? JSON.stringify({ ticket_id: ticket.id, assignment: ticket.assignments.length, ...retried })
-      : JSON.stringify({ ticket_id: ticket.id, title: ticket.title, ...(brief ? { assignment: brief } : {}),
-        ...(read ? { assignment_chars: chars, assignment_read: read } : {}), ...(card ? { trigger: card } : {}),
-        ...(batch.length ? { batch } : {}), ...retried })
+      : JSON.stringify({ ticket_id: ticket.id, title: ticket.title, ...(assignmentText ? { assignment: assignmentText } : {}),
+        ...(card ? { trigger: card } : {}), ...(batch.length ? { batch } : {}), ...earlierWork(ticket, earlier), ...retried })
     const requestId = later ? `assignment:${ticket.id}:${assignment.id}` : first
     await this.host.sessions.prompt(sessionId, requestId, text, 'queue',
       () => { if (!current()) throw new Error('Launch authorization changed before worker delivery') },
       () => { this.host.engine.assignmentStarted(ticket.id, assignment.id) })
     this.host.engine.assignmentStarted(ticket.id, assignment.id)
   }
-  /** Returns the stored ticket for `agent` when it is a worker session, or undefined otherwise. */
+/** Returns the stored ticket for `agent` when it is a worker session, or undefined otherwise. */
   private ticketOf(agent: Agent): Ticket | undefined {
     const ticketId = ticketOfSession(agent.id)
     return ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
@@ -548,9 +610,29 @@ export class DshExecutor implements Executor {
       const ticket = this.ticketOf(agent)
       const assignment = ticket && runningAssignment(ticket)
       if (!ticket || !assignment || !liveTicket(ticket) || this.host.closing()) return
+      // A turn the provider failed for want of context cannot be retried in the same Session: its history is what overflows, so
+      // every retry would fail the same way. The generation closes and the same Assignment starts in a fresh worker Session.
+      if (overflow(error)) { void this.background(this.rotateWorker(ticket.id, assignment.id, agent.id, 'overflow')); return }
       if (this.retries(assignment.id, error)) { this.resumeAfter(ticket.id, assignment.id, error); return }
       void this.background(Promise.resolve().then(() => { this.failed(ticket.id, String(error)) }))
     }))
+  }
+  /**
+   * Ends the worker Session that failed and re-delivers its Assignment into the ticket's next generation. The work is not
+   * failed: an overflow is the Session's verdict, not the work's, and the fresh Session reads the ticket afresh and can look up
+   * what the closed one found.
+   */
+  private async rotateWorker(ticketId: string, assignmentId: string, sessionId: string, reason: 'rounds' | 'overflow'): Promise<void> {
+    this.transient.delete(assignmentId)
+    const worker = this.host.engine.rotateWorker(ticketId, assignmentId, reason)
+    if (worker === undefined) return
+    this.host.context.agents.get(sessionId as SessionId)?.cancel({ kind: 'user' }, { keepInbox: true })
+    this.stopWork(ticketId, reason === 'overflow' ? 'its worker Session ran out of context' : 'its worker Session served its Assignments', true)
+    await this.stopped(ticketId)
+    // The next turn runs in the new generation, which reads why it is there from the ticket rather than from a failure.
+    this.resumeAfter(ticketId, assignmentId, reason === 'overflow'
+      ? `the worker Session ran out of context and is replaced by generation ${worker}; its earlier work is readable at ticket/${ticketId}/worker/${worker - 1}`
+      : 'the worker Session is replaced by a fresh one')
   }
   /** Unsubscribes from host agent events and clears any pending transient-retry timers. */
   dispose(): void {
@@ -569,7 +651,8 @@ export class DshExecutor implements Executor {
       const running = runningAssignment(ticket), latest = latestAssignment(ticket)
       if (running) {
         // A restart within this process left DSH's Sessions, jobs and subagents running: they stop first. The inbox keeps an
-        // Input that was handed over but not yet taken.
+        // Input that was handed over but not yet taken. `alive` is false: the cancel below ends the Session, so a report it
+        // left behind cannot be read as the worker still advancing the ticket.
         this.host.context.agents.get(workerSessionId(ticket.id) as SessionId)?.cancel({ kind: 'user' }, { keepInbox: true })
         this.stopWork(ticket.id, 'dsh-superagent restarted', true)
         this.host.engine.assignmentInterrupted(ticket.id, running.id)
@@ -584,37 +667,60 @@ export class DshExecutor implements Executor {
       (error: unknown) => { health.set({ state: 'error', detail: String(error), at: now() }) })
   }
   /**
-   * Checks whether `error` is a transient failure with retry attempts remaining under `key`, mutating `this.transient`:
-   * increments the attempt counter and returns `true` when retrying, or deletes `key` from `this.transient` and returns `false` when non-transient or out of tries.
+   * Whether `error` is a passing failure of the provider or the network, so the turn is retried: `true` for one it is, and
+   * the attempt count rises; `false` for one a later try meets again, which the ticket reports as its own failure. There is no
+   * attempt limit — an upstream outage is not the work's verdict — so this answers whether to retry, never whether to stop.
    */
   private retries(key: string, error: unknown): boolean {
-    const tries = this.transient.get(key) ?? 0
-    if (!transient(error) || tries >= TRANSIENT_TRIES) { this.transient.delete(key); return false }
-    this.transient.set(key, tries + 1)
+    if (!transient(error)) { this.transient.delete(key); return false }
+    this.transient.set(key, (this.transient.get(key) ?? 0) + 1)
     return true
   }
-  /** Schedules a worker turn retry with exponential backoff after a transient provider or network error. */
+  /**
+   * Records the upstream failure on the Assignment and schedules the next attempt with a doubling backoff, capped so a long
+   * outage keeps trying without flooding the provider. The error is kept whole on the Assignment, which is what a person reads
+   * to tell an outage from the work's own failure.
+   */
   private resumeAfter(ticketId: string, assignmentId: string, error: unknown): void {
-    const tries = this.transient.get(assignmentId)!
-    const text = `Your last turn failed for a passing reason (${String(error).slice(0, 200)}). Continue the assignment where it stopped.`
+    const attempts = this.transient.get(assignmentId) ?? 1
+    const backoffMs = backoffAfter(attempts)
+    this.recordRetry(ticketId, assignmentId, retryState(attempts, error))
+    // The worker is told what failed in its own terms; the Assignment keeps the whole error for the person.
+    const text = `Your last turn failed for a passing reason (${String(error).slice(0, 500)}). Continue the assignment where it stopped.`
     this.resuming.add(assignmentId)
     const go = () => {
       if (this.host.closing()) return
       const ticket = this.host.store.tickets.get(ticketId)
-      if (!ticket || !liveTicket(ticket) || runningAssignment(ticket)?.id !== assignmentId) { this.resuming.delete(assignmentId); return }
+      const assignment = ticket?.assignments.find(item => item.id === assignmentId)
+      if (!ticket || !liveTicket(ticket) || !assignment || runningAssignment(ticket)?.id !== assignmentId) {
+        this.resuming.delete(assignmentId); return
+      }
       // Wait while processing is paused or no wake slot is free.
       if (this.host.paused()) { this.after(SLOT_WAIT_MS, go); return }
-      const sessionId = workerSessionId(ticketId)
+      // The Assignment names its generation: after a rotation that is the fresh Session, and this turn's message is the first it
+      // reads, so it learns the ticket from the start rather than from a turn whose history belongs to another Session.
+      const sessionId = workerSessionId(ticketId, workerOf(assignment))
       const waking = !this.running(ticket)
       try { if (waking) this.slots.reserve(ticketId, 'wake') } catch (failure) {
         if (!(failure instanceof Later)) throw failure
         this.after(SLOT_WAIT_MS, go); return
       }
-      const sent = this.host.sessions.prompt(sessionId, `retry:${assignmentId}:${tries}`, text, 'queue')
+      const sent = this.host.sessions.prompt(sessionId, `retry:${assignmentId}:${attempts}`, text, 'queue')
       void this.background(sent.finally(() => { if (waking) this.slots.free(ticketId); this.resuming.delete(assignmentId) })
-        .catch(failure => { this.failed(ticketId, String(failure)) }))
+        .catch(failure => { if (this.retries(assignmentId, failure)) this.resumeAfter(ticketId, assignmentId, failure)
+        else this.failed(ticketId, String(failure)) }))
     }
-    this.after(TRANSIENT_BACKOFF_MS * 2 ** (tries - 1), go)
+    this.after(backoffMs, go)
+  }
+  /** Writes the retry state onto the running Assignment so the panel, the ticket card and the CLI all show it. */
+  private recordRetry(ticketId: string, assignmentId: string, retry: AssignmentRetry): void {
+    this.host.store.atomic(() => {
+      const ticket = this.host.store.tickets.get(ticketId)
+      const assignment = ticket?.assignments.find(item => item.id === assignmentId)
+      if (!ticket || !assignment) return
+      assignment.retry = retry
+      this.host.store.tickets.save(ticket)
+    })
   }
   /** Schedules `then` to run after `ms` milliseconds unless `dispose()` is called first. */
   private after(ms: number, then: () => void): void {
@@ -708,7 +814,7 @@ export class DshExecutor implements Executor {
       // A quiet final after orchestrator_report is not a new status or an empty handoff.
       if (said) this.relay(resultRelay(updated, 'waiting', said))
       else if (!before.trim()) {
-        this.relay(resultRelay(updated, 'waiting', 'Worker ended without a status report. Use orchestrator_ticket_request_status to request one.'))
+        this.relay(resultRelay(updated, 'waiting', 'Worker ended without a status report. Use orchestrator_ticket action=status to request one.'))
       }
     })
   }

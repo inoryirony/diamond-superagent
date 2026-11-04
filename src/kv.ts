@@ -31,8 +31,10 @@ export const KV = {
   prompts: { revision: record<number>('prompt-revision'), version: family<PromptVersion, [revision: number]>('prompt-version:'),
     /** The built-in text of a prompt part an override was edited from, by its `base`, which shows what an upgrade changed. */
     builtIn: family<string, [base: string]>('prompt-built-in:') },
-  /** Runtime: the main Session's ID. */
-  runtime: { masterId: record<string>('master-id') },
+  /** Runtime: the main Session's ID, and the Eval Sessions retention already archived, so a sweep asks once. */
+  runtime: { masterId: record<string>('master-id'),
+    /** Eval Sessions already archived by retention: a settled Session is asked about once, and the list stays bounded. */
+    archivedEvals: record<string[]>('archived-evals') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */
@@ -70,6 +72,8 @@ export const KV = {
     reactions: family<{ messageId: string; at: number }[], [conversation: string]>('dingtalk-reactions:'),
     /** Directory contacts by the nick a message shows, as `dws contact user search` resolved them; `null` marks a nick that resolved to nobody. */
     names: family<import('./sources/dingtalk-names.ts').ContactRecord, [nick: string]>('dingtalk-names:'),
+    /** Messages this account sent as the agent: each one's `openMessageId` and a digest of its words, which is how its own reply is told from a person's. */
+    sent: family<{ id?: string; digest: string; at: number }[], [conversation: string]>('dingtalk-sent:'),
     /** The card an acknowledgement opened, with its text, waiting for the reply that finishes it. */
     cards: record<Record<string, { bizId: string; text: string; at: number }>>('dingtalk-cards') },
   /**

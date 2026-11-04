@@ -10,8 +10,8 @@ import { sourceContextOf, type SourceContextDeps } from '../src/app/source-conte
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { dingtalkKind } from '../src/sources/dingtalk.ts'
 import { runDingtalk } from '../src/sources/dingtalk-loops.ts'
-import { addReaction, CARD_LIMIT_MS, clip, dingtalkLink, finishCards, REACTION_LIMIT_MS, sendDingtalk, sweepReactions, WORKING_EMOJI }
-  from '../src/sources/dingtalk-channel.ts'
+import { addReaction, cardId, CARD_LIMIT_MS, clearReaction, clip, dingtalkLink, finishCards, isOwnSend, REACTION_LIMIT_MS, sendDingtalk,
+  sweepReactions, textDigest, WORKING_EMOJI } from '../src/sources/dingtalk-channel.ts'
 import { dingtalkThreadContext } from '../src/sources/dingtalk-read.ts'
 import { dingtalkChannel, dingtalkThreadId, dingtalkTrigger, dingtalkTriggerId, EPISODE_GAP_MS, historyEvent, isNoise, localTime, SOURCE,
   type DingtalkThreads } from '../src/sources/dingtalk-trigger.ts'
@@ -181,6 +181,11 @@ describe('dingtalk channel', () => {
     expect(dws.mock.calls[2]![0]).toEqual(['chat', 'message', 'update-card', '--biz-id', 'card-1', '--content', 'Done', '--flow-status', '3'])
     expect(state.get(KV.dingtalk.cards)).toBeUndefined()
   })
+  it('reads the card id from the result envelope dws v1.0.64 prints, not only data', () => {
+    expect(cardId({ result: { bizId: 'transformer_card_1', success: true } })).toBe('transformer_card_1')
+    expect(cardId({ data: { bizId: 'card-2' } })).toBe('card-2')
+    expect(cardId({ result: { success: true } })).toBeUndefined()
+  })
   it('finishes a card left open when its ticket ends, keeping the acknowledgement text', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal)
     const state = records()
@@ -203,6 +208,49 @@ describe('dingtalk channel', () => {
     expect(dws).toHaveBeenCalledWith(['chat', 'message', 'remove-emoji', '--conversation-id', CONVERSATION,
       '--message-id', 'mid_1', '--emoji', WORKING_EMOJI])
     expect(state.get(KV.dingtalk.reactions(CONVERSATION))).toBeUndefined()
+  })
+  it('records every send, so the agent\'s own reply is recognised through the history path where the AI flag is absent', async () => {
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    const state = records()
+    vi.spyOn(commands, 'dws').mockImplementation(async (args: string[]) => args[2] === 'send'
+      ? { result: { openTaskId: 'task-1' } } : { result: { openMessageId: 'sent-1' } })
+    await sendDingtalk({ commands, state }, reply(true))
+    const sent = state.get(KV.dingtalk.sent(CONVERSATION))!
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ id: 'sent-1', digest: textDigest('Done') })
+    expect(isOwnSend(sent, 'sent-1', 'Done')).toBe(true)
+    // A card update carries the words but no message of its own, so the text alone still identifies it.
+    expect(isOwnSend(sent, 'not-listed', 'Done')).toBe(true)
+    expect(isOwnSend(sent, 'sent-2', 'something else entirely')).toBe(false)
+    expect(isOwnSend(undefined, 'sent-1', 'Done')).toBe(false)
+  })
+  it('drops a reply the history path recovers, which carries no AI flag, and keeps one the operator typed', () => {
+    const state = threads()
+    // A send this account made, as the backfill loop would list it: no AI flag, and the operator's own sender ID.
+    const sent = [{ id: 'mid_20', digest: textDigest('the login page is broken'), at: Date.now() }]
+    const own = { sender_open_dingtalk_id: SELF, sender: 'Me', content: 'the login page is broken' }
+    const recovering = { ...state, own: (_c: string, id: string, text: string) => isOwnSend(sent, id, text) } as DingtalkThreads
+    expect(dingtalkTrigger(event('mid_20', own), SELF, recovering)).toBeUndefined()
+    // The same words typed by hand carry no send record, so they still reach the agent as the operator's own message.
+    expect(dingtalkTrigger(event('mid_21', own), SELF, { ...state, own: () => false })).toMatchObject({ meta: { operator: true } })
+  })
+  it('clears every reaction a reply settles, not only the one message it answers', async () => {
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    const state = records()
+    state.set(KV.dingtalk.reactions(CONVERSATION), [{ messageId: 'mid_1', at: Date.now() }, { messageId: 'mid_2', at: Date.now() }])
+    const dws = vi.spyOn(commands, 'dws').mockResolvedValue({})
+    await sendDingtalk({ commands, state }, reply(true))
+    const removed = dws.mock.calls.map(call => call[0] as string[]).filter(args => args[2] === 'remove-emoji')
+    expect(removed.map(args => args[args.indexOf('--message-id') + 1])).toEqual(['mid_1', 'mid_2'])
+    expect(state.get(KV.dingtalk.reactions(CONVERSATION))).toBeUndefined()
+  })
+  it('keeps a reaction on record when its removal fails, so the sweep tries again', async () => {
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    const state = records()
+    state.set(KV.dingtalk.reactions(CONVERSATION), [{ messageId: 'mid_1', at: Date.now() }])
+    vi.spyOn(commands, 'dws').mockRejectedValue(new Error('remove-emoji failed'))
+    await clearReaction({ commands, state }, CONVERSATION, 'mid_1')
+    expect(state.get(KV.dingtalk.reactions(CONVERSATION))).toHaveLength(1)
   })
   it('sweeps a reaction and a card that stayed behind after the work was dropped', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal)

@@ -1,4 +1,4 @@
-/** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
+/** Executor Session tools for reading ticket context, acknowledging requests, and reporting what the work came to. */
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { latestAssignment, liveTicket, runningAssignment, type EngineForExecutor, type Ticket } from '../../core/index.ts'
@@ -11,7 +11,7 @@ import { readResource, type ResourceHost } from '../resources.ts'
 import type { Store } from '../store.ts'
 import { reportRelay, threadFollowedNotice } from '../notices.ts'
 import type { Sessions } from '../sessions.ts'
-import { missingEvidence, toolCalls } from '../session-actions.ts'
+import { missingEvidence, toolCalls, unclaimedWork } from '../session-actions.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 /**
@@ -47,6 +47,19 @@ export function parseMergeRequest(name: string): { project: string; iid: number 
   return short ? { project: short[1]!, iid: Number(short[2]) } : undefined
 }
 
+/**
+ * One statement a worker makes about a conversation it reached: an attached thread that turned out not to be about the ticket,
+ * a related thread it follows for context, or a message it hands back as belonging elsewhere. All three land in a disposition,
+ * none needs a round trip of its own, and the work section already asks for all three by name.
+ */
+export const ThreadsSchema = z.array(z.object({
+  thread: z.string().min(1).optional().describe('An attached thread to drop, as <source>:<id> such as feishu:<chat>:<root> or github:<number>; its own threads cannot be dropped.'),
+  follow: z.string().min(1).optional().describe('A related thread to follow for context only, as <source>:<id>.'),
+  handback: z.string().min(1).optional().describe('A message on this ticket that asks for work beyond it or for another ticket, by its trigger_id; once per message.'),
+  reason: z.string().trim().min(1).max(300).describe('One sentence: why the thread is not about this ticket, how it relates, or what the message asks for beyond it.'),
+}).strict().refine(item => [item.thread, item.follow, item.handback].filter(value => value !== undefined).length === 1,
+  'Each entry names exactly one of thread (drop), follow or handback')).max(20)
+
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
   readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
@@ -65,6 +78,27 @@ export interface ExecutorToolsHost {
   sendReplies(): Promise<void>
 }
 
+/** Carries out one `threads` entry, in the transaction of the report that named it. */
+function threadStatement(host: ExecutorToolsHost, ticketId: string, item: z.infer<typeof ThreadsSchema>[number]) {
+  if (item.thread !== undefined) {
+    host.engine.markUnrelated(ticketId, item.thread, item.reason)
+    return { thread: item.thread, removed: true }
+  }
+  if (item.follow !== undefined) {
+    const at = item.follow.indexOf(':')
+    if (at < 1 || at === item.follow.length - 1) throw new Error('A thread key is <source>:<id>, such as github:<number>')
+    const followed = host.engine.followForContext(ticketId, { source: item.follow.slice(0, at), id: item.follow.slice(at + 1) })
+    if (followed) host.sessions.notify(...threadFollowedNotice(ticketId, item.follow, item.reason))
+    return { thread: item.follow, followed }
+  }
+  return { trigger_id: item.handback, queued: host.engine.handback(ticketId, item.handback!, item.reason) }
+}
+
+/**
+ * The worker's tools: `orchestrator_read` for the ticket record, `orchestrator_ack` before the work, and `orchestrator_report`
+ * after it. Everything a worker has to say about a conversation, a change or a blocker is a field of the report, so the tools
+ * are the two ends of the work and nothing in between.
+ */
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket, agent: Pick<Agent, 'session'>): Tool[] {
   const ticketId = ticket.id
   return [
@@ -84,41 +118,22 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket, agent: Pi
       },
     }),
     tool({
-      name: 'orchestrator_thread_unrelated',
-      description: 'Stop following an attached thread that is not about this ticket, as the work section says; its own threads cannot be dropped.',
-      schema: z.object({
-        thread: z.string().min(1).describe('The thread key, which trigger/<id> of one of its messages shows as thread, such as feishu:<chat>:<root> or github:<number>.'),
-        reason: z.string().trim().min(1).max(300).describe('One sentence on why the thread is not about this ticket.'),
-      }).strict(),
-      execute: async args => { host.engine.markUnrelated(ticketId, args.thread, args.reason); return { removed: true, thread: args.thread } },
-    }),
-    tool({
-      name: 'orchestrator_thread_follow',
-      description: 'Follow a related thread, such as an Issue or another PR, for context only.',
-      schema: z.object({
-        thread: z.string().describe('Thread key, such as github:<number>.'),
-        reason: z.string().trim().min(1).max(300).describe('How it relates, in one sentence.'),
-      }).strict(),
-      execute: async args => host.store.atomic(() => {
-        const at = args.thread.indexOf(':')
-        if (at < 1 || at === args.thread.length - 1) throw new Error('A thread key is <source>:<id>, such as github:<number>')
-        const followed = host.engine.followForContext(ticketId, { source: args.thread.slice(0, at), id: args.thread.slice(at + 1) })
-        if (followed) host.sessions.notify(...threadFollowedNotice(ticketId, args.thread, args.reason))
-        return { followed, thread: args.thread }
-      }),
-    }),
-    tool({
-      name: 'orchestrator_trigger_handback',
-      description: 'Hand back a message that asks for work beyond this ticket or for another one, for a fresh assessment; once per message. queued is false while another ticket still decides it, and for a message that was never this ticket\'s to decide, such as a bot\'s, which is assessed without it.',
-      schema: z.object({
-        trigger_id: z.string().min(1),
-        reason: z.string().trim().min(1).max(300).describe('One sentence on what it asks for beyond this ticket.'),
-      }).strict(),
-      execute: async args => ({ trigger_id: args.trigger_id, queued: host.engine.handback(ticketId, args.trigger_id, args.reason) }),
-    }),
-    tool({
       name: 'orchestrator_report',
       description: 'Report progress, ready, blocked, failed or dropped, as the work and handoff sections say.',
+      concludes: true,
+      // A ready result must show what ran after the last change: the host reads that from the Session's own log, never from the
+      // claim. Both refusals are decided before the report is written, so a refused one answers with its reason and the worker
+      // corrects its own arguments in the same turn; a thrown error made the model think the tool had broken and report again.
+      deny: args => {
+        if (args.state !== 'ready') return undefined
+        const current = host.store.tickets.get(ticketId)
+        if (!current || !liveTicket(current)) return undefined
+        const started = (runningAssignment(current) ?? latestAssignment(current))?.startedAt
+        const calls = toolCalls(agent, started ? Date.parse(started) : 0)
+        // A result that changed a file is a code change whatever it calls itself, so claiming `data`, `verify` or `docs` after an
+        // edit cannot skip the Reviewer: the Session's own calls decide, never the claim.
+        return missingEvidence(calls, args.evidence) ?? unclaimedWork(args.work, calls)
+      },
       schema: z.object({
         state: z.enum(['progress', 'ready', 'blocked', 'failed', 'dropped']),
         summary: z.string().min(1),
@@ -131,48 +146,53 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket, agent: Pi
           what: z.string().trim().min(1).max(300).describe('What was checked: the command, query or file read.'),
           result: z.string().trim().min(1).max(600).describe('What it actually showed.'),
         })).max(12).optional().describe('With ready: what you ran after your last change and what it showed; ready without it is refused.'),
+        work: z.enum(['code', 'data', 'verify', 'docs']).optional().describe('With ready: what this result changed. code (the default) '
+          + 'changed source, a test or a config a build reads, and a Reviewer judges it. data only read data, logs or a database; '
+          + 'verify only ran existing checks; docs only edited prose. Those three have no diff to review, so they go to the person '
+          + 'directly and spend no review round — say which you did instead of letting a review restate your report.'),
+        threads: ThreadsSchema.optional().describe('What you decided about the conversations you read: drop an attached thread that is not '
+          + 'about this ticket, follow a related one for context, or hand back a message that asks for work beyond this ticket. '
+          + 'Each entry is one of those, with a one-sentence reason.'),
       }).strict(),
       execute: async (args, signal) => {
         const current = host.store.tickets.get(ticketId)
         if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
-        // A ready result must show what ran after the last change: the host reads that from the Session's own log, not from the claim.
-        if (args.state === 'ready') {
-          const started = (runningAssignment(current) ?? latestAssignment(current))?.startedAt
-          const refused = missingEvidence(toolCalls(agent, started ? Date.parse(started) : 0), args.evidence)
-          if (refused) throw new Error(refused)
-        }
         const proof = args.evidence?.length ? { evidence: args.evidence } : {}
         // A deployment runs one source control account or the other, so a report names its change on that one. Reading the PR
         // through a GitHub account the deployment does not have used to throw and lose the whole report, even on a ticket whose
         // work is a GitLab merge request, so the branch that does not apply is skipped rather than attempted.
         const pull = args.pr_number != null && host.hasGithub ? await readPull(host.github, args.pr_number, signal) : undefined
+        // The merge-request binding is read outside the transaction: it awaits a `glab` call, and the transaction callback is
+        // synchronous. Leaving the `await` inside it put a Promise in the tool's result, which DSH refuses as "not lossless
+        // JSON"; the model read that refusal as a failed report and reported again, and each retry recorded a real report that
+        // superseded the running review.
+        const merge = args.mr != null && host.hasGitlab ? await bindMergeRequest(host, ticketId, args.mr, signal) : undefined
         // Claim the PR, record the report, and queue the relay atomically so a rejected PR claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
         return host.store.atomic(() => {
+          // What the worker decided about the conversations it read lands with the report, in the report's own transaction.
+          const threads = (args.threads ?? []).map(item => threadStatement(host, ticketId, item))
           if (args.pr_number != null && !host.hasGithub) {
             // Naming a PR with no GitHub account is a mistake the report survives: record it, and say what to send instead.
             const ignored = 'pr_number was ignored: this deployment has no GitHub account, so name the change with mr.'
             const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
               ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
-              ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
+              ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}), ...(args.work ? { work: args.work } : {}) }
             const updated = host.engine.report(ticketId, { ...report, ...proof })
             const relay = reportRelay(updated, report)
             if (relay) host.sessions.relay(relay.id, relay.text)
             return { reported: true, notification: relay ? 'orchestrator' : 'internal_only', note: ignored,
-              ...(updated.attention ? { attention: updated.attention } : {}) }
+              ...(threads.length ? { threads } : {}), ...(updated.attention ? { attention: updated.attention } : {}) }
           }
           const refused = pull && claimPull(host.github, ticketId, pull)
           if (refused) throw new Error(refused)
-          // A merge request names a change to follow, so the ticket ends with it; an unparseable name is reported, not thrown,
-          // because the work reached ready either way and losing the report helps nobody.
-          const merge = args.mr != null && host.hasGitlab ? bindMergeRequest(host, ticketId, args.mr) : undefined
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
-            ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
+            ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}), ...(args.work ? { work: args.work } : {}) }
           const updated = host.engine.report(ticketId, { ...report, ...proof })
           const relay = reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
           const notification = relay ? 'orchestrator' : 'internal_only'
-          return { reported: true, notification, ...(merge ? { merge_request: merge } : {}),
+          return { reported: true, notification, ...(merge ? { merge_request: merge } : {}), ...(threads.length ? { threads } : {}),
             ...(updated.attention ? { attention: updated.attention } : {}) }
         })
       },

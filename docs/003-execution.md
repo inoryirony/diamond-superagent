@@ -27,9 +27,13 @@ An `idle` Ticket has finished its turn without an outstanding question. A Trigge
 
 Each Ticket gets an Executor Session named `worker-<ticket id>` and a directory named after the Ticket's short name. Directories are created under the configured execution root, which defaults to `<stateDir>/work`.
 
+A worker Session carries its history forward, and an Assignment can rewrite the same work through retries, restarts and review returns, so it does not serve the ticket forever. Three Assignments (`WORKER_REUSES`) is where reading the ticket afresh is cheaper than the history, so the fourth opens `worker-<ticket id>-w4` and closes the one before it as `rounds`. A turn the provider fails for want of context closes the generator at once as `overflow`: retrying in the same Session can only fail again, because the history is what overflowed. The Assignment keeps running in either case, and the fresh Session is handed `earlier_workers`, one read pointer per generation before it, whose resource `ticket/<id>/worker/<index>` renders what that worker found. Its only link to an earlier worker's history is that pointer, never its whole transcript.
+
 Executor Sessions run commands without approval as the operator's OS user. Their `dsh-superagent-worker` preset contains the tools needed for work and moves foreground shell commands to background jobs after 5 seconds. This lets a worker receive new messages at the next step instead of waiting for a long command to finish.
 
 The main Session and each Eval's Session use `dsh-superagent-router`, with the same 5-second shell and job-wait limits and a smaller tool set for routing. An Eval Session is created when its candidate is delivered, named `eval-<eval id>` and titled by its first message, and stays readable after the Decision. Sessions retain the preset selected at creation. Worker subagents use DeepSeek Harness's `standard` preset.
+
+Each role owes one thing before its turn may close, and `agent/turn-stopping` is where that is enforced rather than asked for. A worker owes a report on the Assignment it ran; a Reviewer owes a verdict on the round it was told to judge; an Eval owes a decision on every Trigger its card carried. The hook steers once, naming what is missing, and a second attempt is accepted as it stands: a Session that cannot satisfy the rule must still be able to close, and the host records what was missing instead of holding the turn forever. `orchestrator_report` and `orchestrator_review` conclude the turn on success, so the one thing a role owes is also the last thing it does — an ending cannot leave the result only in a final message.
 
 ### Background work and worker slots
 
@@ -96,9 +100,14 @@ Reviews without a body, such as approvals, also arrive as Triggers and can wake 
 
 A worker's result reaches its person through the stages `executor.reviews` and `executor.deploy` switch, in order:
 
-1. **Review** (`reviews`, on by default). A `ready` Report is not the Ticket's result: it asks for a review, which runs in a
-   Session of its own (`reviewer-<ticket>-<round>`) with the worker's directory and tools but none that change it. The Reviewer
-   reads the card, the inputs and the worker's transcript, and the diff, and finishes with `orchestrator_review`.
+1. **Review** (`reviews`, on by default). A `ready` Report that changed code is not the Ticket's result: it asks for a review,
+   which runs in a Session of its own (`reviewer-<ticket>-<round>`) with the worker's directory and tools but none that change it.
+   The Reviewer reads the card, the inputs and the worker's transcript, and the diff, and finishes with `orchestrator_review`.
+   - **What a review judges.** Only a change to code has a diff whose correctness a second reader establishes. A Report names
+     its `work`: `code` (the default) changed source, a test or a build config and is reviewed; `data` only read data, a database
+     or logs, `verify` only ran existing checks, and `docs` only edited prose — those three reach the person directly and spend
+     no review round, because a review of them could only restate the Report. A Report that names no kind is read as `code`, the
+     stricter default.
    - **Passed:** the result is the Ticket's, exactly as the Report would have been: the Ticket ends as "How a Ticket ends"
      describes, or waits for a person where it follows open pull requests.
    - **Returned:** the findings go to the same worker as the first Input of a new Assignment, which revises the same branch.
@@ -189,7 +198,9 @@ Sources poll subscribed Threads while a live Ticket subscribes, and for two week
 
 When an Executor Session reports `blocked` or `failed`, or fails to start or errors, which records `failed`, the Ticket takes no automatic Input.
 
-A passing failure of the model provider or the network, an HTTP 408, 429 or 5xx or a refused, reset or timed-out connection, is tried again first, three times with a growing backoff: a launch runs again, and a worker whose turn failed is told to go on; a failed prepare command is not tried again.
+A passing failure of the model provider or the network — an HTTP 408, 429 or 5xx, or a refused, reset or timed-out connection — is never the work's verdict, so it is retried without an attempt limit: a launch runs again, and a worker whose turn failed is told to go on. The backoff doubles from 15 seconds and stops growing at 5 minutes, so a short outage retries within seconds while a long one keeps a steady rhythm instead of giving up. Each attempt is recorded on the Assignment — the count, the upstream's error whole, and when the next try runs — so a ticket waiting on the provider reads as that rather than as stuck work. A failed prepare command is the one exception: an existing directory counts as prepared, so it fails the Ticket for a person instead of retrying.
+
+A context overflow is not that kind of failure. DSH reports it as `pi-ai detected context overflow` with `CONTEXT_WINDOW_EXCEEDED`, and a gateway may word it `Input exceeds the context limit`; retrying either in the same Session can only fail again, because the Session's own history is what overflowed. The generation closes as `overflow` and the same Assignment continues in the next one, which reads the ticket afresh and is handed a pointer to what the closed worker found.
 
 Once failed, CI and bot messages are recorded on it, but they are not delivered and do not wake the Session.
 

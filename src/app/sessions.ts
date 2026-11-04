@@ -6,7 +6,7 @@ import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import { key, liveTicket, type Ticket } from '../core/index.ts'
+import { key, latestAssignment, liveTicket, runningAssignment, type Ticket } from '../core/index.ts'
 import { isReviewerSession, mandateInstructions, roundOfSession, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
@@ -14,6 +14,7 @@ import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
 import { deskSummary } from './desk.ts'
+import { holdTurn } from './turn.ts'
 import { initializeRoleModel } from './role-models.ts'
 import { bundledSkills } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
@@ -32,7 +33,7 @@ export const isOrchestratorSession = (sessionId: string, masterId: string): bool
 export interface SessionsHost {
   /** DSH Cordis context: sessions, agents, persistence, and their events. */
   readonly context: Context
-  readonly store: Pick<Store, 'tickets' | 'settings' | 'get' | 'set' | 'keys'>
+  readonly store: Pick<Store, 'tickets' | 'threads' | 'triggers' | 'settings' | 'get' | 'set' | 'keys'>
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'compose' | 'skills'>
   readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'idle' | 'pending'>
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
@@ -217,14 +218,24 @@ export class Sessions {
   }
   /** Returns a tool registrar for `agent` that renders tool output as JSON text and attaches `output.image` as an image when present. */
   private registerTool(agent: Agent, binding: SessionBinding): RegisterTool {
-    return (name, description, schema, execute) => {
+    return (name, description, schema, execute, options) => {
       binding.disposers.push(agent.ctx.tools.register({ name, description, parameters: z.toJSONSchema(schema),
         output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => {
           const text = { type: 'text' as const, text: JSON.stringify(value) }
           const image = value && typeof value === 'object' && 'image' in value ? (value as { image: never }).image : undefined
           return image ? [text, { type: 'image' as const, attachment: image }] : [text]
         } },
-        execute: (args, execution) => execute(schema.parse(args), execution.signal) }))
+        // A tool that concludes the turn ends it on its own success, so the model cannot spend a step after the last thing it owes.
+        execute: async (args, execution) => {
+          const parsed = schema.parse(args)
+          // A refusal decided from facts is answered as the tool's own value, before the body writes anything, so the model reads
+          // it as an answer and corrects its arguments in the same turn. A thrown error would read as a broken tool instead.
+          const refused = options?.deny?.(parsed)
+          if (refused) return { refused }
+          const value = await execute(parsed, execution.signal)
+          if (options?.concludes) execution.concludeTurn()
+          return value
+        } }))
     }
   }
   /** Returns `sessionId`'s active model-budget retry state (`{ model_retry }`) for status listings, or `{}` when not waiting on one. */
@@ -276,17 +287,63 @@ export class Sessions {
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
     const register = this.registerTool(agent, binding)
-    for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
+    for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute,
+      ...tool.concludes || tool.deny ? [{ ...tool.concludes ? { concludes: tool.concludes } : {}, ...tool.deny ? { deny: tool.deny } : {} }] : [])
     if (master) {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: this.allowed(agent) }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
+      // An Eval Session owes a decision on every trigger it was handed; the hook asks once, naming what is left.
+      binding.disposers.push(holdTurn(agent, { missing: () => this.unrouted(agent), once: () => `routed:${agent.id}` }))
     } else if (reviewer) {
       // A reviewer has the same tools as a worker: a review that changes the code it judged is voided afterwards (see `Reviewers`).
-      binding.disposers.push(agent.ctx.tools.restrict({ allow: this.allowed(agent) }))
+      // Its turn cannot close without a verdict, which used to end as an unfinished review only after the fact.
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: this.allowed(agent) }),
+        holdTurn(agent, { missing: () => this.unjudged(agent), once: () => `verdict:${agent.id}` }))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
       binding.disposers.push(...this.workOnly(agent, ticket!.id))
+      // A worker's turn cannot close without a report for the assignment it ran: the result used to be lost silently.
+      binding.disposers.push(holdTurn(agent, { missing: () => this.unreported(agent), once: () => `report:${agent.id}:${this.assignmentOf(agent) ?? ''}` }))
     }
+  }
+  /** The Assignment a worker Session runs, by id, or undefined once none is running. */
+  private assignmentOf(agent: Agent): string | undefined {
+    const ticketId = ticketOfSession(agent.id)
+    const ticket = ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
+    return ticket ? runningAssignment(ticket)?.id ?? latestAssignment(ticket)?.id : undefined
+  }
+  /** What a worker owes: a report on the Assignment it ran, unless one is already recorded. */
+  private unreported(agent: Agent): string | undefined {
+    const ticketId = ticketOfSession(agent.id)
+    const ticket = ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
+    if (!ticket || !liveTicket(ticket)) return undefined
+    const assignment = runningAssignment(ticket) ?? latestAssignment(ticket)
+    if (!assignment || assignment.state === 'ended' || assignment.report) return undefined
+    return 'This turn cannot close without a report: call orchestrator_report with progress, ready, blocked, failed or dropped, '
+      + 'naming what you changed and what you ran. The same words in a final message reach nobody.'
+  }
+  /** What a reviewer owes: a verdict for the round it was told to judge. */
+  private unjudged(agent: Agent): string | undefined {
+    const ticketId = ticketOfSession(agent.id), round = roundOfSession(agent.id)
+    const ticket = ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
+    if (!ticket || !liveTicket(ticket) || round === undefined) return undefined
+    const review = ticket.reviews?.find(item => item.round === round)
+    if (!review || review.ended) return undefined
+    return `This turn cannot close without a verdict on round ${round}: call orchestrator_review once with passed, or returned and '
+      + 'the findings the worker must fix.`
+  }
+  /** What an Eval owes: a decision on every trigger its card carried, read from the Thread that is assessing it. */
+  private unrouted(agent: Agent): string | undefined {
+    const evalId = evalOfSession(agent.id)
+    if (!evalId) return undefined
+    const thread = this.host.store.threads.active().find(item => item.evaluating?.id === evalId)
+    const evaluation = thread?.evaluating
+    if (!evaluation) return undefined
+    // A trigger the disposition records as decided is done, whether that decision accepted, ignored or stopped.
+    const pending = evaluation.triggerIds.filter(id => !this.host.store.triggers.disposition(id)?.decisionId)
+    if (!pending.length) return undefined
+    return `This turn cannot close while ${pending.length} trigger(s) of this card are undecided: route each with orchestrator_route, `
+      + `one item by its trigger_id (${pending.slice(0, 5).join(', ')}${pending.length > 5 ? ', …' : ''}).`
   }
   /**
    * Whether a Session runs the router preset: as DSH's preset registry last selected it, read through the session projection

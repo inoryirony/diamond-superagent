@@ -29,7 +29,9 @@ export function feishu(id: string, text: string, overrides: Record<string, unkno
     mentions: [{ id: 'ou_bot' }], ...overrides }, 'ou_bot', 'cli_bot')!
 }
 
-type RegisteredTool = { name: string; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
+type RegisteredTool = { name: string; execute: (args: unknown, execution: { signal: AbortSignal; concludeTurn: () => void }) => Promise<unknown> }
+/** Which Sessions were told a call concluded their turn, and with which tool: the loop reads that as "stop after this batch". */
+const concluded = new Map<string, string[]>()
 type FakeAgent = {
   id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[] }
   cancel: Mock; inject: Mock<(message: UserMessage) => void>; steer: Mock<(message: UserMessage) => void>; followup: Mock<(message: UserMessage) => void>
@@ -313,7 +315,8 @@ export async function startRuntime(seed?: (store: Store) => void) {
     if (checks.before && name === 'orchestrator_report' && (args as { state?: string }).state === 'ready') ran(sessionId)
     // DSH logs every call as it starts, with the raw arguments the model produced.
     logs.get(sessionId)?.push({ type: 'tool/call', time: Date.now(), data: { name, arguments: JSON.stringify(args) } })
-    return await tool.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
+    return await tool.execute(args, { signal: new AbortController().signal,
+      concludeTurn: () => { concluded.set(sessionId, [...concluded.get(sessionId) ?? [], name]) } }) as Record<string, unknown>
   }
   /** The read a model makes of a trigger's conversation before it attaches or answers: its resource, which carries the live history. */
   const readTrigger = (sessionId: string, triggerId: string) => runTool(sessionId, 'orchestrator_read', { resource: `trigger/${triggerId}` })
@@ -347,6 +350,8 @@ export async function startRuntime(seed?: (store: Store) => void) {
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
   return { runtime, ctx, directory, agents, tools, deliveries, relays, cards, candidates, evalSession, runTool, route, acceptedTicket, api, controller, subprocess, hooks, failures, resolveDefault, stop,
-    jobs, subagents, step, claim, review, finishReview, reviews, ran, checks, restricts, readTrigger }
+    jobs, subagents, step, claim, review, finishReview, reviews, ran, checks, restricts, readTrigger,
+    /** The tools whose call was taken to end its Session's turn, in order. */
+    concludedFor: (sessionId: string) => concluded.get(sessionId) ?? [] }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

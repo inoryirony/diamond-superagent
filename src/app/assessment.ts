@@ -65,7 +65,7 @@ export interface AssessorHost {
   candidateCard(candidate: Candidate): Promise<Record<string, unknown>>
 }
 
-/** Schema for bounded context or repository read requests during an active evaluation (`orchestrator_eval_read`). */
+/** Schema for a bounded read of a candidate's thread or repository, kept for the reads a card's window points at. */
 export const EvalReadSchema = z.object({
   trigger_id: z.string().min(1).describe('Original candidate ID returned by orchestrator_eval; every reference is scoped to this trigger.'),
   resource: z.enum(['message', 'root', 'parent', 'thread', 'file', 'directory', 'image']),
@@ -98,6 +98,9 @@ export class MasterAssessor implements Assessor {
     host.effects.handle('assessment', async ({ triggerId }, evalId) => {
       const candidate = this.host.engine.candidate(triggerId)
       if (candidate?.evalId !== evalId) return
+      // The card carries the Eval's whole tuple, so the window is read before the delivery rather than on a later call the
+      // Session could skip: `docs/001` enumerates the input, and one delivery is what makes a per-Eval Session work.
+      await this.window(evalId, candidate.triggers.at(-1)!)
       await this.host.deliver(evalId, `candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) }))
       this.host.engine.candidateDelivered(evalId)
     }, { limit: () => host.paused() ? 0 : 4 })
@@ -165,7 +168,7 @@ export class MasterAssessor implements Assessor {
           }
         } catch (error) {
           caller?.throwIfAborted()
-          if (current()) reads.error = `Thread context unavailable: ${String(error).slice(0, 300)}. Use orchestrator_eval_read before deciding based on missing context.`
+          if (current()) reads.error = `Thread context unavailable: ${String(error).slice(0, 300)}. Read the thread with orchestrator_read before deciding based on missing context.`
         }
       }).finally(() => { if (current()) delete reads.loading })
       reads.loading = loading
@@ -175,10 +178,31 @@ export class MasterAssessor implements Assessor {
     if (!this.live(evalId, trigger)) throw new Error(FINISHED)
   }
   /**
+   * The thread snapshot of the Eval `evalId` assesses, for its card. `docs/001` enumerates an Eval's input, so the whole tuple
+   * arrives with the delivery: nothing is left for the Session to fetch, and two Evals cannot be judged on different windows.
+   * `trigger` names the message the Eval is about, whose own text the card already carries at its top level.
+   */
+  async window(evalId: string, trigger: Trigger): Promise<unknown> {
+    await this.seed(evalId, trigger).catch(() => {})
+    const { context, error } = this.evals.get(evalId) ?? {}
+    if (!context) return { complete: false, error: error ?? 'The thread could not be read' }
+    const source = this.host.threadContext(trigger)
+    const at = context.messages.findIndex(message => message.id === source?.messageId)
+    return { complete: context.complete, loaded_messages: context.messages.length, source_found: context.window.source_found,
+      ...context.next ? { next_cursor: context.next } : {}, messages: context.messages.map((message, index) => {
+        // The trigger's own text is at the top level of the card; long neighbours are cut with their full length, and the rest of
+        // the thread is read through `orchestrator_read trigger/<id>`.
+        const shown = index === at ? { trigger: true } : message.text.length <= WINDOW_CHARS ? { text: message.text }
+          : { text: `${message.text.slice(0, WINDOW_CHARS)}…`, chars: message.text.length }
+        return { id: message.id, from: message.from, at: message.at, ...message.bot ? { bot: true } : {},
+          ...message.deleted ? { deleted: true } : {}, ...shown }
+      }) }
+  }
+  /**
    * Returns the `orchestrator_eval` payload: the trigger's text once (up to `TRIGGER_CHARS`), batch peers, related tickets
    * on the thread, the Policy version its Eval was built from, and the initial thread window (first five messages and five
    * on either side of the trigger, truncated to `WINDOW_CHARS` or `NEAR_CHARS` for its two nearest neighbours with total
-   * length and image IDs, plus other loaded messages as `STUB_CHARS` previews; `orchestrator_eval_read` reads any message
+   * length and image IDs, plus other loaded messages as `STUB_CHARS` previews; `orchestrator_read trigger/<id>` reads any message
    * in full by ID).
    * Assessment instructions live in the main Session's prompt (`prompts/admission.md`), not in this payload.
    */
@@ -222,7 +246,7 @@ export class MasterAssessor implements Assessor {
   }
   /**
    * Serves bounded paginated text or image attachments from the evaluation's thread context or repository for
-   * `orchestrator_eval_read`; `agent` is the main Session, which receives images as attachments.
+   * `orchestrator_read`; `agent` is the main Session, which receives images as attachments.
    */
   async read(agent: Agent, read: EvalRead, signal: AbortSignal) {
       const { candidate, trigger } = this.evalFor(read.trigger_id)
