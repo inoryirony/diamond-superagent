@@ -19,7 +19,7 @@ A new message in the same ticket has its own acknowledgement.
 Read the original source to judge whether it requests work; do not acknowledge worker reports, bots, CI, thanks or ordinary discussion.
 Answer quick questions directly without an extra acknowledgement.
 Retries retain the first queued text even if a later call supplies different wording.
-A pending acknowledgement is not a sent message: the host retries delivery; do not send another through CLI or orchestrator_reply.
+A pending acknowledgement is not a sent message: the host retries delivery; do not send another through the CLI or orchestrator_ticket.
 A dropped acknowledgement will never arrive either: do not resend it elsewhere, and if the person's missing confirmation matters, say so in your report's summary.
 Do not scan old history to backfill acknowledgements.
 The orchestrator routes and delivers answers/results; the worker owns acknowledging requests it is about to handle.
@@ -31,6 +31,6 @@ DingTalk replies are capped at 4000 characters. An answer carries its evidence: 
 Evidence means primary facts from this investigation: a definition in code or configuration, a query result, a log line. A ticket or its summary backs context, never an object's attribution by itself; an answer saying what belongs where names where that is defined or recorded.
 Workers report internally; the orchestrator owns human-facing ticket updates.
 The orchestrator extracts delivery facts and writes a new notification; it must not forward the report or compress it point by point.
-Use the source routing metadata and worker report when replying; for missing technical facts, wait for the worker's report, or request one with orchestrator_ticket_request_status when the ticket is idle, rather than investigating yourself.
+Use the source routing metadata and worker report when replying; for missing technical facts, wait for the worker's report, or request one with orchestrator_ticket action=status when the ticket is idle, rather than investigating yourself.
 Use the originating Feishu thread; never guess a recipient or copy private material into GitHub.
 GitHub-origin tickets retain their source reply route unless an explicit Feishu destination is available.

@@ -2,7 +2,7 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, liveTicket, reportHistory, reviewsInAttempt, runningAssignment } from './model.ts'
-import type { ReportEntry, ReportEvidence, ReportState, Ticket } from './model.ts'
+import type { ReportEntry, ReportEvidence, ReportState, Ticket, WorkKind } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
 import { REVIEW_ROUNDS, type Reviews } from './reviews.ts'
@@ -20,6 +20,12 @@ export interface WorkerReport {
   answers?: string
   /** What the worker ran or read to show its result, kept on the report's entry in the ledger; a ready report must bring it. */
   evidence?: ReportEvidence[]
+  /**
+   * What kind of work this result is, which decides whether a Reviewer reads it. A Reviewer judges a change to code; reading
+   * data, running a verification and editing prose have no diff whose correctness a second reader could establish, so they go
+   * to a person directly. The worker says which it did, because only it knows.
+   */
+  work?: WorkKind
 }
 const RECOVERY_NOTE = 'The host restarted during this ticket. Inspect the current worktree, git history and GitHub state before continuing. Do not repeat an already completed external operation. Finish the original assignment and report its status.'
 
@@ -83,16 +89,19 @@ export class Assignments extends EnginePart {
   }
   /**
    * Handles a running assignment interrupted by a host restart: restarts it with a recovery note unless its latest report is
-   * `waiting`, `ready`, `blocked`, or `failed` and no input was delivered after that report, in which case it keeps its
-   * session and flushes any waiting undelivered inputs.
+   * `waiting`, `ready`, `blocked`, or `failed` and no input was delivered after that report. `ready`, `blocked` and `failed`
+   * wait on a person, so the restart leaves them alone. `waiting` means the worker itself carries on, which only holds while its
+   * Session survives the restart: the Executor cancels that Session before calling this, so a `waiting` report alone cannot keep
+   * the ticket on a dead worker, and `alive` decides that one case.
    */
-  interrupted(ticketId: string, assignmentId: string): void {
+  interrupted(ticketId: string, assignmentId: string, alive = false): void {
     const ticket = this.running(ticketId, assignmentId)
     const running = ticket && runningAssignment(ticket)
     if (!ticket || !running) return
     const report = running.report
     const busy = !!running.deliveredAt && !!report && running.deliveredAt >= report.at
     const settled = !!report && ['waiting', 'ready', 'blocked', 'failed'].includes(report.state) && !busy
+      && (report.state !== 'waiting' || alive)
     if (!settled) this.tickets.restart(ticket, running, 'hostRestarted', RECOVERY_NOTE)
     else if (ticket.undelivered.length) this.options.executor.deliver(ticket, running)
   }
@@ -127,7 +136,8 @@ export class Assignments extends EnginePart {
     // A replaced or cleared attention question withdraws any pending unsent reply for the previous question from the outbox.
     if (previous && previous.id !== attention?.id) this.replies.withdrawAttention(previous.id)
     // The ledger keeps every report with its author; `report` stays the mirror of the last one that the rest of the code reads.
-    assignment.reports = [...reportHistory(assignment), { by, state: report.state, summary: report.summary, at, ...report.evidence?.length ? { evidence: report.evidence } : {} }]
+    assignment.reports = [...reportHistory(assignment), { by, state: report.state, summary: report.summary, at,
+      ...report.evidence?.length ? { evidence: report.evidence } : {}, ...report.work ? { work: report.work } : {} }]
     assignment.report = { state: report.state, summary: report.summary, at }
     ticket.updatedAt = at
     if (report.answers && !ticket.answers?.includes(report.answers)) ticket.answers = [...ticket.answers ?? [], report.answers]

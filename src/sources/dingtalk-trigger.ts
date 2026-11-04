@@ -49,6 +49,11 @@ export interface DingtalkThreads {
   episode(conversationId: string): Episode | undefined
   /** The conversation's known peer, so a message the operator typed himself is answered to the other person. */
   peer(conversationId: string): string | undefined
+  /**
+   * Whether this account sent the message as the agent, which is what tells its own reply from a person's. The AI flag is not
+   * enough: the history path never sees it, and a send may not carry it, so the Source keeps the send record instead.
+   */
+  own?(conversationId: string, messageId: string, text: string): boolean
   /** Records the message's root and makes it the conversation's latest episode. */
   remember(conversationId: string, messageId: string, rootId: string, at: number): void
 }
@@ -100,21 +105,26 @@ export function localTime(iso: string): string {
 }
 
 /**
- * Converts one DingTalk message into a Trigger. Returns undefined for the agent's own messages, which carry a `messageAiSendFlag`,
- * and for messages `isNoise` drops. A message the operator typed himself is a normal Trigger marked `meta.operator`, so a chat
- * he answers in is settled by him rather than by the agent.
+ * Converts one DingTalk message into a Trigger. Returns undefined for a message this account sent as the agent, and for messages
+ * `isNoise` drops. A message the operator typed himself is a normal Trigger marked `meta.operator`, so a chat he answers in is
+ * settled by him rather than by the agent. The AI flag alone does not settle that: the history path never carries one, and a
+ * send may omit it, so the Source's send record is consulted with it.
  */
 export function dingtalkTrigger(input: unknown, selfOpenId: string, threads: DingtalkThreads): Trigger | undefined {
   const event = EventSchema.parse(input)
   if (isNoise(event.content)) return
   const self = selfOpenId !== '' && event.sender_open_dingtalk_id === selfOpenId
-  if (self && event.messageAiSendFlag) return
+  if (self && (event.messageAiSendFlag || threads.own?.(event.conversation_id, event.message_id, event.content))) return
   const direct = event.type === 'user_im_message_receive_o2o_all'
   const at = dingtalkTime(event)
   const rootId = dingtalkRoot(event, Date.parse(at), threads)
   threads.remember(event.conversation_id, event.message_id, rootId, Date.parse(at))
   const peerOpenId = self ? threads.peer(event.conversation_id) ?? event.sender_open_dingtalk_id : event.sender_open_dingtalk_id
   const mentioned = event.mentioned ?? !direct
+  // A direct message marks `addressed`, which for a message someone else wrote means they wrote it to this account. The
+  // operator's own direct message is the opposite: it is his words to the other person, not a request to the agent, so it is
+  // marked `forPeer` and the gate decides whether that person is someone this deployment serves.
+  const forPeer = self && direct
   return { id: dingtalkTriggerId(event.message_id), source: SOURCE,
     threads: [{ source: SOURCE, id: dingtalkThreadId(event.conversation_id) }],
     actor: { source: SOURCE, id: event.sender_open_dingtalk_id }, human: true,
@@ -122,6 +132,7 @@ export function dingtalkTrigger(input: unknown, selfOpenId: string, threads: Din
     at, text: event.content,
     channel: dingtalkChannel(event.conversation_id, peerOpenId, event.message_id, direct),
     meta: { conversationId: event.conversation_id, messageId: event.message_id, peerOpenId, direct, rootId, sender: event.sender,
+      ...(forPeer ? { forPeer: true } : {}),
       ...(event.quoted_message?.message_id ? { parentId: event.quoted_message.message_id } : {}), ...(self ? { operator: true } : {}) } }
 }
 

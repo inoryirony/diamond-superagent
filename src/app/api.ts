@@ -34,6 +34,13 @@ export interface Api {
   'GET tickets/:id': { response: TicketPageView }
   'POST tickets/:id/retry': { response: { retried: true } }
   'POST tickets/:id/stop': { response: { stopped: true } }
+  'POST tickets/:id/note': { body: { text: string }; response: { noted: true } }
+  'POST tickets/:id/attach': { body: { trigger_id: string; note?: string }; response: { attached: true } }
+  'POST tickets/:id/hold': { body: { question: string; options: { id: string; text: string; by: string }[]; input_ids?: string[]
+    trigger_id?: string; due_in_minutes?: number }; response: { held: true; hold_id: string } }
+  'POST tickets/:id/release': { body: { resolution: string; option?: string }; response: { released: true } }
+  'PATCH tickets/:id': { body: { title?: string }; response: { updated: true } }
+  'POST tickets/:id/reply': { body: { text: string; purpose?: 'result' | 'answer'; trigger_id?: string }; response: { reply_id: string; status: string; reused: boolean } }
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
   'GET policy/history': { response: HistoryView }

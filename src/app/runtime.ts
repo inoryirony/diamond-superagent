@@ -24,6 +24,7 @@ import type { ChannelLinks } from '../sources/kind.ts'
 import { DshExecutor, isReviewerSession, reviewerSessionId, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { evalTitle, followupWhileAssessing, ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
+import { EvalRetention } from './eval-retention.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
@@ -31,6 +32,7 @@ import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
+import { startExternalApi } from './external.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
@@ -84,6 +86,8 @@ export class Runtime extends Service implements SourceHost {
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
   private readonly disposers: (() => void)[] = []
+  /** Stops the loopback listener that serves the management API outside the DSH window; replaced when its port changes. */
+  private externalApi?: { port: number; stop: () => Promise<void> }
   private releaseLock?: () => Promise<void>
   private closingFlag = false
   private stopping?: Promise<void>
@@ -122,7 +126,9 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       }, () => ({ get: name => store.get(name), set: (name, value) => { if (value === undefined) store.delete(name); else store.set(name, value) } }))
-      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
+      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime,
+        // The Eval's window comes from the assessor, which read the thread before delivering the card that carries it.
+        window: async (evalId, trigger) => runtime.assessor.window(evalId, trigger) }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
@@ -244,11 +250,58 @@ export class Runtime extends Service implements SourceHost {
    * Read live, so a changed workspace applies to the next Session created.
    */
   private masterWorkspace(): string { return this.store.settings().executor.workspace || this.machine.stateDir }
+  /**
+   * Archives Eval Sessions dsh-superagent no longer keeps readable. An archived Session stays on disk and out of the sidebar; its
+   * turns are stopped first, which the workspace registry does itself through `stopActivity`.
+   */
+  private async archiveSessions(ids: readonly string[]): Promise<void> {
+    for (const id of ids) await this.ctx.workspaceRegistry.archiveSession(id as SessionId, { stopActivity: true })
+  }
+  /**
+   * One retention sweep: first learn which Eval Sessions exist on disk, then archive what retention no longer keeps. Learning the
+   * list needs an await, which is why it is not part of the synchronous `decisions` and `sessions` reads the sweep takes.
+   */
+  private async sweepEvals(retention: EvalRetention): Promise<void> {
+    await this.refreshEvalSessions()
+    await retention.sweep().catch(() => { /* logged per Session */ })
+  }
+  /** Every Eval Session this installation has, including the ones abandoned before they decided anything. */
+  private evalSessionIds(): string[] {
+    // A live Agent holds a running Session; a persisted one is listed without being woken.
+    return [...this.ctx.agents.list().map(agent => agent.id), ...this.persistedEvals]
+      .filter((id): id is string => typeof id === 'string' && id.startsWith('eval-'))
+  }
+  /** Persisted Eval Session IDs, refreshed by `refreshEvalSessions` from what the Session controller lists. */
+  private persistedEvals: string[] = []
+  /** Reads the persisted Session list once and keeps the Eval Sessions among it, so a sweep knows what exists on disk. */
+  private async refreshEvalSessions(): Promise<void> {
+    try {
+      const page = await this.ctx.sessionController.list({}, this.lifetime)
+      this.persistedEvals = page.items.map(item => item.sessionId as string)
+        .filter(id => typeof id === 'string' && id.startsWith('eval-'))
+    } catch { /* The live Agents still name the running ones, which is enough to leave them alone. */ }
+  }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
   private paused(): boolean { return !this.setup.configured() || this.store.settings().paused }
+  /**
+   * Start, restart or stop the loopback listener that serves the management API outside the DSH window, following the
+   * configured port. Called at startup and whenever the settings notice a change, so a port set in the panel takes effect
+   * without restarting the plugin; a failed listen is logged and leaves the panel's own route working.
+   */
+  syncExternalApi(): void {
+    const port = this.machine.externalApiPort.get()
+    if (this.externalApi?.port === port) return
+    const previous = this.externalApi
+    this.externalApi = undefined
+    void previous?.stop()
+    if (!port) return
+    const log = (message: string) => this.ctx.logger.info(message)
+    this.externalApi = { port, stop: startExternalApi(this.httpHost(), port, log) }
+  }
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
+    this.syncExternalApi()
     if (!await this.setup.run(this.store.settings())) {
       this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
       return
@@ -263,6 +316,19 @@ export class Runtime extends Service implements SourceHost {
     this.reviewers.resume()
     this.passes.start()
     this.effects.start()
+    // A port changed in the panel is volatile, so it applies without remounting the plugin; this follows it at a cost of one
+    // read per interval and nothing when it is unchanged.
+    const followPort = setInterval(() => { if (!this.closing()) this.syncExternalApi() }, 5000)
+    this.disposers.push(() => clearInterval(followPort))
+    // An Eval Session is kept only while a Decision might be read back from it: the sweep archives the rest, once a minute.
+    const retention = new EvalRetention({
+      decisions: () => this.store.read.recentDecisions(0, 500),
+      sessions: () => this.evalSessionIds(),
+      active: () => this.store.threads.active().flatMap(thread => thread.evaluating ? [evalSessionId(thread.evaluating.id)] : []),
+      store: this.store, archive: async ids => this.archiveSessions(ids), live: id => this.ctx.agents.get(id as SessionId) !== undefined,
+      log: message => this.ctx.logger.info(message) })
+    const sweeping = setInterval(() => { if (!this.closing()) void this.sweepEvals(retention) }, 60_000)
+    this.disposers.push(() => clearInterval(sweeping))
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
   }
   private httpHost(): HttpHost {
@@ -292,6 +358,7 @@ export class Runtime extends Service implements SourceHost {
       this.executor.dispose()
       this.sessions.dispose()
       for (const dispose of this.disposers.reverse()) dispose()
+      await this.externalApi?.stop()
       await this.ctx.sessionPersistence.flush()
     } finally {
       // Close the database before releasing the directory lock so another process cannot open the database mid-write; a compromised lock may already be released.

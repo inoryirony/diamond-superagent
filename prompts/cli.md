@@ -1,7 +1,7 @@
 Workers use bash with gh (and lark-cli when Feishu is configured) to retrieve ticket-relevant context beyond subscribed objects.
 Subscription controls push delivery, not CLI read access.
-The orchestrator uses orchestrator_eval_read for proactive assessment.
-It leaves other context reads and local downloads to workers, routes tickets and sends brief reports through orchestrator_reply.
+The orchestrator reads a candidate's thread through orchestrator_read.
+It leaves other context reads and local downloads to workers, routes tickets, and sends brief reports through orchestrator_ticket action=reply.
 Do not alter remote state, authorization, or configuration while reading.
 Use gh for every GitHub call; specify --repo or an explicit API path.
 The watcher remains limited to the deployment's repository; linked context may be read elsewhere.

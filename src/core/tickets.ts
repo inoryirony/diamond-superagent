@@ -1,10 +1,11 @@
 /** Tickets: their lifecycle from an accept to their end, their Subscriptions and their Inputs. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { STALL_MS, holdsInput, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, stalledSince, threadKey,
-  waitsForPerson } from './model.ts'
+import { localDay, nextWorkInstant, withinWorkHours } from '../infra/hours.ts'
+import { STALL_MS, WORKER_REUSES, activeWorker, workerOf, holdsInput, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled,
+  stalledSince, threadKey, waitsForPerson } from './model.ts'
 import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
-  Trigger, TriggerDisposition } from './model.ts'
+  Trigger, TriggerDisposition, WorkerRecord } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
@@ -191,13 +192,27 @@ export class Tickets extends EnginePart {
    * Watches one held ticket for a conflict nobody settled by its `dueAt`: it emits `ticket.holdDue` so the main Session asks
    * the people again or escalates to the operator, moves `dueAt` on by the same wait, and records that it asked. Nothing changes
    * otherwise: only a release lifts the hold.
+   *
+   * A reminder reaches a person in their own conversation, so it is sent only inside their working hours and at most once a
+   * night: a hold that comes due at 02:00 waits for 09:00, and an evening that keeps the hold open asks nobody twice.
    */
   holdDue(ticketId: string, now: string): void {
     const ticket = this.repo.tickets.get(ticketId)
     const hold = ticket?.hold
     if (!ticket || !hold || hold.released || !hold.dueAt || hold.dueAt > now) return
+    const at = new Date(now)
+    // Outside working hours nothing is sent: the due time moves to the next working instant, a fact the card shows, instead of
+    // a message a person has to ignore at night.
+    if (!withinWorkHours(at)) { hold.dueAt = nextWorkInstant(now); ticket.updatedAt = now; this.repo.tickets.save(ticket); return }
+    // One question a night: a hold already asked today is not asked again before tomorrow, however overdue it reads.
+    if (hold.remindedAt && localDay(new Date(hold.remindedAt)) === localDay(at)) {
+      hold.dueAt = nextWorkInstant(new Date(at.getTime() + 24 * 60 * 60_000).toISOString())
+      ticket.updatedAt = now
+      this.repo.tickets.save(ticket)
+      return
+    }
     const waited = Date.parse(hold.dueAt) - Date.parse(hold.at)
-    hold.dueAt = new Date(Date.parse(now) + Math.max(waited, 60_000)).toISOString()
+    hold.dueAt = nextWorkInstant(new Date(Date.parse(now) + Math.max(waited, 60_000)).toISOString())
     hold.remindedAt = now
     ticket.updatedAt = now
     this.repo.tickets.save(ticket)
@@ -224,7 +239,9 @@ export class Tickets extends EnginePart {
     const at = this.now()
     ticket.hold = { id: key('hold', ticketId, at), question: hold.question, inputs: hold.inputs ?? [],
       ...hold.options?.length ? { options: hold.options } : {}, ...(hold.triggerId ? { triggerId: hold.triggerId } : {}),
-      ...(hold.dueAt ? { dueAt: hold.dueAt } : {}), at }
+      // A hold is asked about in working hours: a due time at night is moved to the next 09:00 here, so no reminder is ever
+      // scheduled for a time the deployment does not reach people in.
+      ...(hold.dueAt ? { dueAt: nextWorkInstant(hold.dueAt) } : {}), at }
     ticket.updatedAt = at
     this.repo.tickets.save(ticket)
     return ticket
@@ -495,13 +512,70 @@ export class Tickets extends EnginePart {
     const later = ticket.inputs.some(input => input.kind !== 'policy-changed' && Date.parse(input.at) > Date.parse(report?.at ?? ''))
     return report?.state !== 'ready' || ticket.undelivered.length > 0 || later
   }
-  /** Add a pending Assignment; a failed delivery to the one before it no longer concerns the ticket. */
+  /**
+   * Add a pending Assignment; a failed delivery to the one before it no longer concerns the ticket. It runs in the ticket's active
+   * worker Session, unless that Session already served `WORKER_REUSES` Assignments: then it is closed and a fresh one takes over,
+   * which reads the ticket afresh instead of carrying a history three rounds of work long.
+   */
   private newAssignment(ticket: Ticket, revises = false): Assignment {
-    const assignment: Assignment = { id: key('assignment', ticket.id, String(ticket.assignments.length)), state: 'pending', createdAt: this.now(),
-      ...revises ? { revises: true as const } : {} }
+    const at = this.now()
+    ticket.workers ??= []
+    // Assignments recorded before generations existed ran in generation 1, which is what `workerOf` reads them as.
+    if (!ticket.workers.length) ticket.workers.push({ index: 1, from: ticket.createdAt })
+    const active = activeWorker(ticket)
+    const served = ticket.assignments.filter(item => workerOf(item) === (active?.index ?? -1)).length
+    if (active && served >= WORKER_REUSES) { active.closed = 'rounds'; active.closedAt = at }
+    if (!activeWorker(ticket)) ticket.workers.push({ index: (ticket.workers.at(-1)?.index ?? 0) + 1, from: at })
+    const worker = ticket.workers.at(-1)!
+    const assignment: Assignment = { id: key('assignment', ticket.id, String(ticket.assignments.length)), state: 'pending', worker: worker.index,
+      createdAt: at, ...revises ? { revises: true as const } : {} }
     ticket.assignments.push(assignment)
     delete ticket.delivery
     return assignment
+  }
+  /** The worker generation a new Assignment would run in: the active one, or the index a rotation would open. */
+  activeWorkerIndex(ticket: Ticket): number {
+    const active = activeWorker(ticket)
+    const served = ticket.assignments.filter(item => workerOf(item) === (active?.index ?? -1)).length
+    return active && served < WORKER_REUSES ? active.index : (ticket.workers?.at(-1)?.index ?? 0) + 1
+  }
+  /**
+   * Close the worker Session that runs `assignment` and move that Assignment onto the ticket's next generation, in one
+   * transaction. The Assignment keeps running: a turn that ran out of context, or a generation that served its Assignments, is
+   * replaced by a Session that reads the ticket afresh and can look up what the closed one found.
+   * @returns the generation the Assignment now runs in, or undefined when the ticket or Assignment is gone.
+   */
+  rotateWorker(ticketId: string, assignmentId: string, reason: NonNullable<WorkerRecord['closed']>): number | undefined {
+    const ticket = this.require(ticketId)
+    const assignment = ticket.assignments.find(item => item.id === assignmentId)
+    if (!assignment) return undefined
+    const at = this.now()
+    ticket.workers ??= []
+    const current = ticket.workers.find(item => item.index === workerOf(assignment))
+    // The generation this Assignment is already in is the newest one: an earlier caller closed it, but the turn that failed was
+    // already running here, so moving again would spend a Session on nothing.
+    if (!current) ticket.workers.push({ index: (ticket.workers.at(-1)?.index ?? 0) + 1, from: at })
+    else if (!current.closed) { current.closed = reason; current.closedAt = at; ticket.workers.push({ index: current.index + 1, from: at }) }
+    assignment.worker = ticket.workers.at(-1)!.index
+    ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+    return assignment.worker
+  }
+  /**
+   * Close the worker Session that ran `assignment`, so the ticket's next Assignment starts a fresh one. The Executor calls this
+   * for a generation that served its Assignments, and the record keeps the closed generation readable through
+   * `ticket/<id>/worker/<index>`.
+   * @throws UserError when the ticket is unknown.
+   */
+  closeWorker(ticketId: string, worker: number, reason: NonNullable<WorkerRecord['closed']>): Ticket {
+    const ticket = this.require(ticketId)
+    const record = ticket.workers?.find(item => item.index === worker)
+    if (!record || record.closed) return ticket
+    record.closed = reason
+    record.closedAt = this.now()
+    ticket.updatedAt = record.closedAt
+    this.repo.tickets.save(ticket)
+    return ticket
   }
   private endAssignment(ticket: Ticket, assignment: Assignment, reason: string): void {
     assignment.state = 'ended'; assignment.endedAt = this.now(); assignment.endedReason = reason
@@ -517,6 +591,21 @@ export class Tickets extends EnginePart {
     const at = this.now()
     this.addInput(ticket, { id: key('input', ticketId, 'note', at, text), kind: 'note', text, at })
     return this.require(ticketId)
+  }
+  /**
+   * Correct an open ticket's title. The Mandate's scope stays as accepted: the title is how people and cards name the work,
+   * while the scope is what the Decision authorized, so relabelling a mislabelled ticket does not widen what it may do.
+   * @throws UserError when the ticket is unknown, has ended, or the title is empty.
+   */
+  retitle(ticketId: string, title: string): Ticket {
+    const ticket = this.require(ticketId)
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    const next = title.trim()
+    if (!next) throw new UserError('emptyTitle')
+    ticket.title = next
+    ticket.updatedAt = this.now()
+    this.repo.tickets.save(ticket)
+    return ticket
   }
   /**
    * Finish a ticket whose result a review passed: end it when its work is done with the Threads it follows, as a ready

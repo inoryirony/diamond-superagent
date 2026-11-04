@@ -485,3 +485,25 @@ describe('bots and events without a sender', () => {
       ['ci', { listedUnaddressed: false, unlistedAddressed: false, unlistedUnaddressed: false }]])
   })
 })
+
+describe('the operator\'s own message to somebody else', () => {
+  const OPERATOR = 'ou_operator'
+  const operatorTo = (peer: string): Trigger => feishu({ actor: { source: 'feishu', id: OPERATOR }, addressed: 'direct',
+    meta: { chatId: `p2p-${peer}`, direct: true, mentioned: false, operator: true, forPeer: true, peerOpenId: peer } })
+
+  it('authorizes nothing when the person he wrote to is not on the list', () => {
+    // A share with a colleague this deployment does not serve is his words to them, not a request to the agent.
+    expect(policy.gate(operatorTo('ou_stranger'), thread(), [])).toEqual({ admissible: false, reason: 'operatorForUnlistedPeer' })
+  })
+
+  it('authorizes work when the person he wrote to is served, because that conversation is the deployment\'s own', () => {
+    const gate = policy.gate(operatorTo(MEMBER), thread(), [])
+    expect(gate).toMatchObject({ admissible: true, strength: 'explicit', basis: expect.objectContaining({ via: 'addressed', addressed: 'direct' }) })
+  })
+
+  it('leaves his message in a group at the ordinary gate, which its mention or the admission table decides', () => {
+    const group = feishu({ actor: { source: 'feishu', id: OPERATOR }, addressed: 'mention',
+      meta: { chatId: CHAT, direct: false, mentioned: true, operator: true } })
+    expect(policy.gate(group, thread(), [])).toMatchObject({ admissible: true, strength: 'explicit' })
+  })
+})

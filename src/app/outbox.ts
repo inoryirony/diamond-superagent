@@ -7,11 +7,24 @@ import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Store } from './store.ts'
 
 export interface OutboxHost {
-  readonly store: Pick<Store, 'atomic' | 'receipts'>
+  readonly store: Pick<Store, 'atomic' | 'receipts' | 'settings'>
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
   paused(): boolean
+}
+/**
+ * Whether a message may reach its conversation at all. The Source's own rule answers first, then the Policy: a direct chat is
+ * between this account and one person, so the agent writes there only to somebody this deployment serves. A message queued for
+ * a person who is not on the list settles as ignored rather than retrying, because no retry makes them a member.
+ */
+function deliverable(host: Pick<OutboxHost, 'sources' | 'store'>, receipt: { channel: { source: string; address: Record<string, string> } }): boolean {
+  if (!host.sources.channelAllowed(receipt.channel)) return false
+  const { address } = receipt.channel
+  if (address.direct !== 'true') return true
+  const peer = address.peerOpenId ?? ''
+  const allowed = host.store.settings().policy.sources[receipt.channel.source]?.allowed ?? []
+  return !!peer && allowed.some(item => item.id === peer)
 }
 
 /**
@@ -43,7 +56,7 @@ export class Outbox implements OutboxPort {
     if (!sources.instance(receipt.channel.source)?.enabled) throw new Later('The Source is off or not installed')
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
-    if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
+    if (!deliverable(this.host, receipt)) { store.receipts.settle(receipt, 'channelIgnored'); return }
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
     const result = await sources.send(receipt, commands)
     if (result === 'waiting') throw new Later('The Source is not installed')

@@ -186,6 +186,24 @@ export class Engine {
   restartTicket(ticketId: string, instruction: string): Ticket {
     return this.repo.atomic(() => this.tickets.restartReviewSpent(ticketId, instruction))
   }
+  /**
+   * Records that the worker Session which ran `worker` of the ticket is over, so the next Assignment starts a fresh one: `rounds`
+   * when that generation served its Assignments, `overflow` when a turn failed for want of context. The Executor calls it after
+   * ending the Session, which keeps the closed generation readable.
+   * @throws UserError when the ticket is unknown.
+   */
+  workerClosed(ticketId: string, worker: number, reason: 'rounds' | 'overflow'): Ticket {
+    return this.repo.atomic(() => this.tickets.closeWorker(ticketId, worker, reason))
+  }
+  /**
+   * Moves a running Assignment onto the ticket's next worker Session, closing the one it is in, and returns that generation: the
+   * worker's turn ran out of context, or its generation served its Assignments, and neither is the work's verdict. The Executor
+   * ends the old Session first, then re-delivers the Assignment's message into the new one.
+   * @returns the generation the Assignment now runs in, or undefined when the ticket or Assignment is gone.
+   */
+  rotateWorker(ticketId: string, assignmentId: string, reason: 'rounds' | 'overflow'): number | undefined {
+    return this.repo.atomic(() => this.tickets.rotateWorker(ticketId, assignmentId, reason))
+  }
 
   // The Executor
 
@@ -242,6 +260,12 @@ export class Engine {
    */
   note(ticketId: string, text: string): Ticket { return this.repo.atomic(() => this.tickets.note(ticketId, text)) }
   /**
+   * Correct an open ticket's title: see `Tickets.retitle`. Every later card, list and notice reads it, so a wrong title
+   * misleads whoever routes the next message.
+   * @throws UserError when the ticket is unknown or has ended.
+   */
+  retitle(ticketId: string, title: string): Ticket { return this.repo.atomic(() => this.tickets.retitle(ticketId, title)) }
+  /**
    * Park the inputs a conflict is about until someone settles which direction stands: see `Tickets.hold`. The rest of the
    * ticket keeps working.
    * @throws UserError when the ticket is unknown or ended.
@@ -290,11 +314,11 @@ export class Engine {
   }
   /**
    * Handles an assignment that was running when the host stopped: restarts it with a recovery note unless its latest report is
-   * `waiting`, `ready`, `blocked`, or `failed` and no Input reached its worker after that report, in which case it keeps its
-   * Session and state and gets the Inputs that wait for it.
+   * `waiting`, `ready`, `blocked`, or `failed`, no Input reached its worker after that report, and `alive` says the Session still
+   * answers; otherwise the work would sit on a Session the stop already ended.
    */
-  assignmentInterrupted(ticketId: string, assignmentId: string): void {
-    this.repo.atomic(() => { this.assignments.interrupted(ticketId, assignmentId) })
+  assignmentInterrupted(ticketId: string, assignmentId: string, alive = false): void {
+    this.repo.atomic(() => { this.assignments.interrupted(ticketId, assignmentId, alive) })
   }
 
   // Reviews
@@ -323,8 +347,13 @@ export type EngineForSources = Pick<Engine, 'receive' | 'bindThread' | 'threadCl
 /** What the main Session asks of the Engine. */
 export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'
   | 'hold' | 'release' | 'changedSince' | 'boardSeq'>
-/** What people ask of the Engine, through the panel or the main Session. */
-export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'restartTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
+/**
+ * What people ask of the Engine, through the panel, the main Session, or an operator outside the DSH window (the loopback
+ * management API): stopping and retrying work, and correcting a ticket's own record — its title, a note, an attachment, a
+ * hold on a contradiction.
+ */
+export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'restartTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'
+  | 'note' | 'attach' | 'hold' | 'release' | 'retitle' | 'reply'>
 /** What Settings tells the Engine. */
 export type EngineForSettings = Pick<Engine, 'policyChanged'>
 /**
@@ -334,7 +363,7 @@ export type EngineForSettings = Pick<Engine, 'policyChanged'>
 export type EngineForReviewer = Pick<Engine, 'reviewEnded'>
 /** What the Executor tells the Engine, and what its workers ask of it. */
 export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed'
-  | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply'>
+  | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply' | 'workerClosed' | 'rotateWorker'>
 
 /** The Reviewer the Engine runs with when its host has none, which never reviews: results are the ticket's, as without reviews. */
 const ABSENT_REVIEWER: ReviewerPort = { review: () => { throw new UserError('noReviewer') }, stopReview: () => {} }

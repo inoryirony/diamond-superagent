@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
 import { Later } from '../src/app/effects.ts'
 import { reportRelay } from '../src/app/notices.ts'
-import { WorkerSlots, inputMessage, mandateInstructions, ticketExecution, transient, triggerMessage } from '../src/executor/dsh.ts'
+import { WorkerSlots, inputMessage, mandateInstructions, overflow, ticketExecution, transient, triggerMessage } from '../src/executor/dsh.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { deferred, waitUntil } from './fixtures/async.ts'
@@ -189,7 +189,7 @@ it('records on the ticket that its worker Session could not be created again', a
   expect(h.runtime.store.tickets.get(one.ticket.id)).toMatchObject({ delivery: { error: expect.stringContaining('The Session store is offline') } })
 })
 
-it('lets a worker go on after a passing provider failure, three times, before its ticket fails', async () => {
+it('lets a worker go on after a passing provider failure, without ever failing its ticket, and records each attempt', async () => {
   const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
   const ticket = () => h.runtime.store.tickets.get(one.ticket.id)!
   const fail = (error: unknown) => { h.ctx.emit('agent/error', { agent: h.agents.get(one.sessionId), turn: 1, step: 1, error } as never) }
@@ -203,10 +203,16 @@ it('lets a worker go on after a passing provider failure, three times, before it
     expect(latestAssignment(ticket())?.report).toBeUndefined()
   } finally { vi.useRealTimers() }
   fail(busy); fail(busy)
+  // Still no report: a passing failure says nothing about the work, so the ticket keeps its result open instead of failing.
   expect(latestAssignment(ticket())?.report).toBeUndefined()
-  // The fourth passing failure fails the ticket, as any other failure does at once.
-  fail(busy)
-  await vi.waitFor(() => expect(latestAssignment(ticket())?.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('Service Unavailable') }))
+  // And it never gives up: many failures later the ticket is still retrying, with the provider's own words on the assignment.
+  for (let round = 0; round < 8; round++) fail(busy)
+  await vi.waitFor(() => {
+    const assignment = latestAssignment(ticket())
+    expect(assignment?.report).toBeUndefined()
+    expect(assignment?.retry).toMatchObject({ error: expect.stringContaining('Service Unavailable') })
+    expect(assignment!.retry!.attempts).toBeGreaterThan(8)
+  })
 })
 describe('a worker that goes on after a passing failure', () => {
   const busy = () => Object.assign(new Error('Service Unavailable'), { status: 503 })
@@ -801,6 +807,38 @@ it('tells a passing failure of the provider or the network from one that a later
     expect(transient(error)).toBe(false)
   }
 })
+it('recognises a context overflow by its code or by either way the provider words it', () => {
+  // DSH names it itself; a gateway that drops the code still says what happened.
+  expect(overflow(Object.assign(new Error('pi-ai detected context overflow for model "deepseek-flash"'), { code: 'CONTEXT_WINDOW_EXCEEDED' }))).toBe(true)
+  expect(overflow(new Error('400 {"error":{"message":"status_code=400, Input exceeds the context limit (1048568 tokens). Please shorten the input."}}'))).toBe(true)
+  expect(overflow(Object.assign(new Error('x'), { code: 'CONTEXT_OVERFLOW' }))).toBe(true)
+  // A passing failure is not an overflow: it keeps retrying in the same Session instead of spending a generation.
+  for (const error of [Object.assign(new Error('x'), { status: 503 }), new TypeError('fetch failed'), new Error('rate limit')]) {
+    expect(overflow(error)).toBe(false)
+  }
+})
+/**
+ * A worker Session that overflows cannot be retried in place: its history is what overflows. The generation closes and the same
+ * Assignment continues in the next one, which is told where the earlier work can be read.
+ */
+it('replaces the worker Session that overflows and continues the Assignment in the next generation', async () => {
+  const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
+  const before = latestAssignment(h.runtime.store.tickets.get(one.ticket.id)!)!
+  expect(before.worker).toBe(1)
+  const agent = h.agents.get(one.sessionId)!
+  h.ctx.emit('agent/error', { agent, error: Object.assign(new Error('pi-ai detected context overflow for model "deepseek-flash"'),
+    { code: 'CONTEXT_WINDOW_EXCEEDED' }) } as never)
+  await h.runtime.idle()
+  const ticket = h.runtime.store.tickets.get(one.ticket.id)!
+  const after = latestAssignment(ticket)!
+  // The same Assignment keeps running, in the second generation; nothing was reported failed.
+  expect(after.id).toBe(before.id)
+  expect(after.state).toBe('running')
+  expect(after.worker).toBe(2)
+  expect(after.report).toBeUndefined()
+  // The first generation is closed as an overflow, and its work stays readable.
+  expect(ticket.workers).toEqual([expect.objectContaining({ index: 1, closed: 'overflow' }), expect.objectContaining({ index: 2 })])
+})
 it('reports a worker waiting when its turn ends after a person answered its blocked report', async () => {
   const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
   await h.runTool(one.sessionId, 'orchestrator_report', { state: 'blocked', summary: 'Which color?' })
@@ -912,9 +950,12 @@ describe('the Executor\'s parts', () => {
       at: '2026-09-01T00:00:00Z', text: 'Which page?', meta: {} } as Trigger
     const reply = { ...asked, id: 'tr2', text: 'The login page. '.repeat(50) }
     const card = triggerMessage(reply, { source_url: 'https://x' }, 'see the log', asked)
-    expect(card).toEqual({ trigger_id: 'tr2', from: 'ou_a', thread: 'feishu:oc:om_1', at: '2026-09-01T00:00:00Z', text: expect.stringMatching(/^The login page\./),
-      chars: reply.text.length, read: 'trigger/tr2', source_url: 'https://x', routing_note: 'see the log', replies_to: { trigger_id: 'tr1', preview: 'Which page?' } })
-    expect(card.text).toHaveLength(601)
+    // The message arrives whole: a cut request would send the worker to a second tool for what it was already told.
+    expect(card).toEqual({ trigger_id: 'tr2', from: 'ou_a', thread: 'feishu:oc:om_1', at: '2026-09-01T00:00:00Z', text: reply.text,
+      source_url: 'https://x', routing_note: 'see the log', replies_to: { trigger_id: 'tr1', preview: 'Which page?' } })
+    expect(card.text).toHaveLength(reply.text.length)
+    expect(card).not.toHaveProperty('chars')
+    expect(card).not.toHaveProperty('read')
     expect(triggerMessage(asked, {})).toEqual({ trigger_id: 'tr1', from: 'ou_a', thread: 'feishu:oc:om_1', at: asked.at, text: 'Which page?' })
     expect(JSON.parse(inputMessage({ id: 'i1', kind: 'trigger', triggerId: 'tr2', at: '' }, card)!)).toEqual(card)
     expect(JSON.parse(inputMessage({ id: 'i1', kind: 'trigger', triggerId: 'gone', at: '' })!)).toEqual({ trigger_id: 'gone', read: 'trigger/gone' })

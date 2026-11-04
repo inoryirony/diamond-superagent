@@ -148,6 +148,21 @@ const PromptsQuery = z.object({ revision: count.optional(), offset: count.defaul
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
 const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
+/** Bodies an operator outside the panel sends to change a ticket, matching the shapes the main Session's tools take. */
+const NoteBody = z.object({ text: z.string().trim().min(1).max(4000) }).strict()
+const AttachBody = z.object({ trigger_id: z.string().trim().min(1), note: z.string().trim().max(2000).optional() }).strict()
+const HoldBody = z.object({
+  question: z.string().trim().min(1).max(2000),
+  options: z.array(z.object({ id: z.string().trim().min(1), text: z.string().trim().min(1), by: z.string().trim().min(1) }).strict())
+    .min(2).max(6),
+  input_ids: z.array(z.string().trim().min(1)).max(50).optional(),
+  trigger_id: z.string().trim().min(1).optional(),
+  due_in_minutes: z.number().int().min(1).max(43_200).optional(),
+}).strict()
+const ReleaseBody = z.object({ resolution: z.string().trim().min(1).max(2000), option: z.string().trim().min(1).optional() }).strict()
+const PatchBody = z.object({ title: z.string().trim().min(1).max(200).optional() }).strict()
+const ReplyBody = z.object({ text: z.string().trim().min(1).max(4000), purpose: z.enum(['result', 'answer']).optional(),
+  trigger_id: z.string().trim().min(1).optional() }).strict()
 
 function routes(runtime: HttpHost): Routes {
   const { store } = runtime
@@ -193,6 +208,50 @@ function routes(runtime: HttpHost): Routes {
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
     'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
     'POST tickets/:id/stop': ({ params }) => { const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true } },
+    'POST tickets/:id/note': async ({ params, body }) => {
+      const id = ticket(params.id)
+      const { text } = NoteBody.parse(await body())
+      runtime.engine.note(id, text)
+      return { noted: true }
+    },
+    'POST tickets/:id/attach': async ({ params, body }) => {
+      const id = ticket(params.id)
+      const { trigger_id, note } = AttachBody.parse(await body())
+      runtime.engine.attach(id, trigger_id, note)
+      return { attached: true }
+    },
+    'POST tickets/:id/hold': async ({ params, body }) => {
+      const id = ticket(params.id)
+      const input = HoldBody.parse(await body())
+      const at = new Date(Date.now() + (input.due_in_minutes ?? 1440) * 60_000).toISOString()
+      const held = runtime.engine.hold(id, { question: input.question, options: input.options,
+        ...input.input_ids?.length ? { inputs: input.input_ids } : {}, ...input.trigger_id ? { triggerId: input.trigger_id } : {},
+        dueAt: at })
+      return { held: true, hold_id: held.hold!.id }
+    },
+    'POST tickets/:id/release': async ({ params, body }) => {
+      const id = ticket(params.id)
+      const { resolution, option } = ReleaseBody.parse(await body())
+      runtime.engine.release(id, resolution, 'person', option)
+      return { released: true }
+    },
+    // An operator outside the panel who read a worker's report may deliver it where the ticket lives; the reply's own rules
+    // still decide: a result only for a ready ticket, an answer only for a question the worker reported.
+    'POST tickets/:id/reply': async ({ params, body }) => {
+      const id = ticket(params.id)
+      const input = ReplyBody.parse(await body())
+      const reply = runtime.engine.reply({ purpose: input.purpose ?? 'result', ticketId: id, text: input.text,
+        ...input.trigger_id ? { triggerId: input.trigger_id } : {} } as Parameters<EngineForPeople['reply']>[0])
+      return { reply_id: reply.id, status: reply.status, reused: reply.reused }
+    },
+    // A wrong title misleads every later card that reads it, so an operator outside the panel may correct it; a stopped or
+    // ended ticket keeps its title, since its Decision already recorded the scope it was accepted under.
+    'PATCH tickets/:id': async ({ params, body }) => {
+      const id = ticket(params.id)
+      const { title } = PatchBody.parse(await body())
+      if (title !== undefined) runtime.engine.retitle(id, title)
+      return { updated: true }
+    },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
     'PUT settings/:block': async ({ params, body }) => {
       const block = SettingsBlockSchema.parse(params.block)
@@ -228,21 +287,27 @@ function match(table: Routes, method: string, segments: string[]) {
   }
   return undefined
 }
+/**
+ * Answers one `/orchestrator/api/...` request: same-origin guard, route match, and the JSON response. Shared by the loopback
+ * listener the plugin opens for external callers and by the route it registers on DSH's web server for the panel, so both
+ * expose exactly the same operations.
+ */
+export async function dispatchApi(req: IncomingMessage, res: ServerResponse, runtime: HttpHost, port: number): Promise<void> {
+  const table = routes(runtime)
+  const url = new URL(req.url ?? '/', 'http://localhost')
+  if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
+  if (!sameOrigin(req, port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+  try {
+    await runtime.ready
+    const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
+    if (!route) throw new RouteError(404, 'Unknown operation')
+    const query = Object.fromEntries(url.searchParams)
+    json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
+  } catch (error) { json(res, ...failure(error)) }
+}
 export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
-  const table = routes(runtime)
   const disposers = [
-    ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
-      const url = new URL(req.url ?? '/', 'http://localhost')
-      if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
-      if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
-      try {
-        await runtime.ready
-        const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
-        if (!route) throw new RouteError(404, 'Unknown operation')
-        const query = Object.fromEntries(url.searchParams)
-        json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
-      } catch (error) { json(res, ...failure(error)) }
-    } })]
+    ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: (req, res) => dispatchApi(req, res, runtime, ctx.webServer.port) })]
   return () => { for (const dispose of disposers) dispose() }
 }

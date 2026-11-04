@@ -1,5 +1,5 @@
 /** Compact, bounded model-facing projections of triggers, tickets, threads, and decisions; full texts stay behind readable resources. */
-import { latestReport, reasonText, threadKey, ticketStage, type Decision, type Mandate, type Thread, type Ticket, type TicketInput,
+import { latestAssignment, latestReport, reasonText, reportHistory, threadKey, ticketStage, type Decision, type Mandate, type ReportEntry, type Thread, type Ticket, type TicketInput,
   type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { pullOf } from '../sources/github-pull.ts'
 import { batchLine, inputResource } from '../executor/dsh.ts'
@@ -28,14 +28,40 @@ function cardState(ticket: Ticket): TicketCardState {
   if (stage.stage === 'review') return 'review/running'
   return stage.stage === 'idle' ? 'idle' : stage.stage === 'working' && stage.action ? 'working/queued' : 'working'
 }
+/**
+ * The latest report with its author, which `assignment.report` alone does not carry: a card has to tell a worker's account of
+ * its work from a failure the host recorded for the machinery that ran it.
+ */
+function latestEntry(ticket: Pick<Ticket, 'assignments'>): ReportEntry | undefined {
+  const assignment = ticket.assignments.findLast(item => item.report)
+  return assignment ? reportHistory(assignment).at(-1) : undefined
+}
+/**
+ * Whether a report's summary is the worker's account of its work or a host-recorded failure of the machinery that ran it. A
+ * `failed` report the host wrote carries the thrown error (a provider refusing the call, a command that could not run), which
+ * says nothing about the ticket's business: a card that shows it reads as the ticket's state and hides what the ticket is for.
+ */
+const hostFault = (report: ReportEntry): boolean => report.by === 'host' && report.state === 'failed'
+/** The ticket's own account of where it stands, or a plain statement that the machinery failed rather than the work. */
+function cardPreview(ticket: Ticket): string {
+  const report = latestEntry(ticket)
+  if (!report) return ''
+  return hostFault(report) ? 'The worker could not run; the ticket itself is unchanged.' : preview(report.summary)
+}
 export function ticketCard(ticket: Ticket) {
   const ended = ticket.ended && { at: ticket.ended.at, by: ticket.ended.by, reason: ticket.ended.reason ?? ticket.ended.outcome }
   const { attention, hold } = ticket
+  const report = latestEntry(ticket)
+  // A ticket waiting out an upstream outage is not stuck on its work, so the list says which attempt it is on and when the next
+  // one runs; without it the card reads as an ordinary running ticket and nobody knows why nothing advances.
+  const retry = latestAssignment(ticket)?.retry
   return { ticket_id: ticket.id, title: ticket.title, state: cardState(ticket), strength: ticket.mandate.strength,
     ...(pullOf(ticket) ? { pr_number: pullOf(ticket) } : {}), ...(ended ? { ended } : {}),
     ...(hold && !hold.released ? { hold: { question: hold.question, ...hold.triggerId ? { trigger_id: hold.triggerId } : {}, at: hold.at } } : {}),
     ...(attention ? { attention: { question: attention.question, ...attention.triggerId ? { trigger_id: attention.triggerId } : {} } } : {}),
-    preview: preview(latestReport(ticket)?.summary ?? ''), read: `ticket/${ticket.id}` }
+    ...(report && hostFault(report) ? { worker_failed: true } : {}),
+    ...(retry ? { retrying: { attempts: retry.attempts, next_at: retry.nextAt } } : {}),
+    preview: cardPreview(ticket), read: `ticket/${ticket.id}` }
 }
 /** Strips `policyVersion`, an internal hash that callers never query by. */
 const mandateOf = ({ policyVersion: _version, ...mandate }: Mandate) => mandate
@@ -53,6 +79,11 @@ export function inputLine(ticket: Ticket, input: TicketInput, worker = false) {
 }
 export function assignmentLine(ticket: Ticket, item: Ticket['assignments'][number]) {
   return { id: item.id, state: item.state, at: item.createdAt, ...(item.endedReason ? { ended_reason: reasonText({ code: item.endedReason }) } : {}),
+    // An upstream failure keeps the ticket alive, so the attempt count, when it retries and the provider's own words are what
+    // tell a person waiting on it that the work is not stuck, only the provider.
+    ...(item.retry ? { retry: { attempts: item.retry.attempts, backoff_seconds: Math.round(item.retry.backoffMs / 1000),
+      next_at: item.retry.nextAt, at: item.retry.at, error: preview(item.retry.error).slice(0, 300),
+      chars: item.retry.error.length, read: `ticket/${ticket.id}/retry/${item.id}` } } : {}),
     ...(item.report ? { report: { state: item.report.state, at: item.report.at, preview: preview(item.report.summary).slice(0, 100),
       chars: item.report.summary.length, read: `ticket/${ticket.id}/report/${item.id}` } } : {}) }
 }
@@ -116,7 +147,7 @@ export function relatedTickets(tickets: readonly Ticket[], now = new Date()) {
 /** The card an Eval's Session gets when another message arrives on the Thread it assesses. */
 export function followupWhileAssessing(trigger: Trigger) {
   return { kind: 'followup_while_assessing', trigger: triggerCard(trigger),
-    note: 'This message arrived on the same thread while you assess. Route it now with orchestrator_route (attach, ignore or accept), or answer it with orchestrator_reply and route ignore; otherwise it is assessed separately after your decision.' }
+    note: 'This message arrived on the same thread while you assess. Route it now with orchestrator_route (attach, ignore or accept), or answer it with kind=answer; otherwise it is assessed separately after your decision.' }
 }
 /** A short Session title for an Eval: the text of its first Trigger. */
 export function evalTitle(store: { threads: { active(): readonly { evaluating?: { id: string; triggerIds: string[] } }[] }; triggers: { get(id: string): { text: string } | undefined } }, evalId: string): string {

@@ -9,7 +9,7 @@ import { dingtalkThreadId, dingtalkTrigger, historyEvent, historyMessages, Histo
   type DingtalkEvent, type DingtalkThreads } from './dingtalk-trigger.ts'
 import { enrichActorName } from './dingtalk-names.ts'
 import { health, type SourceContext } from './host.ts'
-import { addReaction, CARD_LIMIT_MS, finishCards, sweepReactions } from './dingtalk-channel.ts'
+import { addReaction, CARD_LIMIT_MS, finishCards, isOwnSend, sweepReactions } from './dingtalk-channel.ts'
 import type { DingtalkConfig } from './dingtalk.ts'
 import { cursorAt } from './poll.ts'
 
@@ -29,6 +29,7 @@ function threadsOf(ctx: SourceContext): DingtalkThreads {
     root: (conversationId, messageId) => ctx.state.get(KV.dingtalk.roots(conversationId))?.[messageId],
     episode: conversationId => ctx.state.get(KV.dingtalk.episodes(conversationId)),
     peer: conversationId => ctx.state.get(KV.dingtalk.chats)?.[conversationId]?.peerOpenId,
+    own: (conversationId, messageId, text) => isOwnSend(ctx.state.get(KV.dingtalk.sent(conversationId)), messageId, text),
     remember: (conversationId, messageId, rootId, at) => {
       ctx.atomic(() => {
         const rootKey = KV.dingtalk.roots(conversationId)
@@ -60,7 +61,10 @@ async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
     })
   const name = ctx.state.get(KV.dingtalk.chats)?.[conversationId]?.name || conversationId
   const chat = trigger.meta.direct === true ? { value: { zh: '私聊', en: 'Direct message' } } : { value: name }
-  for (const ref of trigger.threads) ctx.threads.describe(threadKey(ref), { facts: { chat } })
+  // A direct chat is one lane per person, so it is named after that person: a label from the first message content would name
+  // the lane after whatever either side happened to say first, and the next message there would read as another lane's business.
+  const direct = trigger.meta.direct === true && name !== conversationId ? `私聊 · ${name}` : undefined
+  for (const ref of trigger.threads) ctx.threads.describe(threadKey(ref), { ...direct ? { label: direct } : {}, facts: { chat } })
 }
 function available(ctx: SourceContext): boolean {
   const resolved = ctx.deployment.dingtalk

@@ -1,6 +1,6 @@
 /** Reviews: a ticket's result goes to a review of its own before the ticket delivers or ends it. */
 import { UserError } from './errors.ts'
-import { latestAssignment, liveTicket, reviewRequired, reviewRound, reviewsInAttempt } from './model.ts'
+import { latestAssignment, liveTicket, reportHistory, reviewRequired, reviewRound, reviewedWork, reviewsInAttempt } from './model.ts'
 import type { Assignment, Ticket } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { ReviewReport, ReviewerPort } from './ports.ts'
@@ -27,11 +27,18 @@ export class Reviews extends EnginePart {
     super(options)
     this.reviewer = reviewer
   }
-  /** Whether this ticket's ready result asks for a review: reviews are on and its rounds last. */
+  /**
+   * Whether this ticket's ready result asks for a review: reviews are on, the work changed code, and its rounds last. A
+   * Reviewer judges a diff; a result that only read data, ran a check or edited prose has nothing for it to judge, so it goes
+   * to a person directly instead of spending a round on a review that can only restate the report.
+   */
   required(ticket: Ticket): boolean {
     const on = this.options.executor.reviews?.() ?? false
-    const wanted = reviewRequired(ticket, true, REVIEW_ROUNDS)
-    return on && wanted
+    if (!on) return false
+    // The latest report says what the work was; a report that did not say is read as a code change, the stricter default.
+    const work = reportHistory(latestAssignment(ticket) ?? ({} as Assignment)).at(-1)?.work
+    if (!reviewedWork(work)) return false
+    return reviewRequired(ticket, true, REVIEW_ROUNDS)
   }
   /**
    * Ends any review still running on `assignment`'s earlier result, for a newer report that replaces it. The worker revised

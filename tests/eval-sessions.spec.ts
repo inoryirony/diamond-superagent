@@ -21,7 +21,7 @@ it('delivers each candidate to a Session of its own, named after the Eval and ti
   expect(h.controller.create).toHaveBeenCalledWith(expect.objectContaining({ sessionId, agentPreset: 'dsh-superagent-router' }))
   expect(h.controller.rename).toHaveBeenCalledWith({ sessionId, title: 'eval @bot 修一下回归' })
   // The Eval Session carries the orchestrator's tools and role, and routes its own candidate.
-  for (const name of ['orchestrator_route', 'orchestrator_eval', 'orchestrator_reply', 'orchestrator_read']) expect(h.tools.get(sessionId)!.has(name)).toBe(true)
+  for (const name of ['orchestrator_route', 'orchestrator_ticket', 'orchestrator_read']) expect(h.tools.get(sessionId)!.has(name)).toBe(true)
   expect(isOrchestratorSession(sessionId, h.runtime.masterId)).toBe(true)
   expect(evalOfSession(sessionId)).toBe(evalId)
   expect(evalOfSession(h.runtime.masterId)).toBeUndefined()
@@ -115,5 +115,5 @@ it('keeps worker reports and follow-up notices on the main Session, which still 
   expect(kinds).toContain('follow_up')
   expect(kinds).not.toContain('candidate')
   expect(h.relays(sessionId).map(item => item.trigger_id)).toContain(followup.id)
-  expect(await h.runTool(h.runtime.masterId, 'orchestrator_ticket_request_status', { ticket_id: ticket.id })).toMatchObject({ ticket: { ticket_id: ticket.id } })
+  expect(await h.runTool(h.runtime.masterId, 'orchestrator_ticket', { action: 'status', ticket_id: ticket.id })).toMatchObject({ ticket: { ticket_id: ticket.id } })
 })

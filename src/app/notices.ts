@@ -84,7 +84,7 @@ export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket |
     const { ticketId, assignmentId, idleForMs } = event.data
     const minutes = Math.round(idleForMs / 60_000)
     return receiptNotice({ ticket_stalled: { ticket_id: ticketId, assignment_id: assignmentId, idle_minutes: minutes, read: `ticket/${ticketId}` }, at,
-      note: 'Its worker said nothing for this long and was already asked for its status once. Ask again with orchestrator_ticket_request_status, '
+      note: 'Its worker said nothing for this long and was already asked for its status once. Ask again with orchestrator_ticket action=status, '
         + 'or start it afresh with orchestrator_ticket_restart; orchestrator_read shows its transcript.' },
       `Ticket ${ticketId} has been silent for ${minutes} minutes`)
   }

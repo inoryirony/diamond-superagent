@@ -8,8 +8,20 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
   description: string
   schema: S
   execute: (args: z.infer<S>, signal: AbortSignal) => Promise<unknown>
+  /**
+   * A successful call ends the Session's turn. A report or a verdict is the last thing a role has to say, so the loop stops
+   * there instead of letting the model spend another step looking for something to add.
+   */
+  concludes?: true
+  /**
+   * Why this call may not run, decided before the body does. A reason denies the call with the reason as the tool's answer, so
+   * the model corrects its own arguments in the same turn instead of reading a thrown error as a broken tool. It must decide
+   * from facts alone: anything that would have to look at the result belongs in `execute`, after the write it guards.
+   */
+  deny?: (args: z.infer<S>) => string | undefined
 }
-export type RegisterTool = <S extends z.ZodType>(name: string, description: string, schema: S, execute: Tool<S>['execute']) => void
+export type RegisterTool = <S extends z.ZodType>(name: string, description: string, schema: S, execute: Tool<S>['execute'],
+  options?: Pick<Tool, 'concludes' | 'deny'>) => void
 export const tool = <S extends z.ZodType>(definition: Tool<S>): Tool => definition as unknown as Tool
 
 /** Human-facing acknowledgement text, constrained to `IM_WORDS` regardless of which channel it is posted to. */

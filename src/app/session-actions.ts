@@ -79,3 +79,17 @@ export function missingEvidence(calls: readonly string[], evidence: readonly unk
   }
   return runs(calls) || shown ? undefined : 'Ready needs evidence, and nothing has run in this assignment: report what you checked and what it showed, or blocked if there is nothing to run.'
 }
+
+/** The kinds of result that changed nothing a Reviewer could read a diff of, so they reach the person without a review round. */
+const UNREVIEWED = ['data', 'verify', 'docs']
+/**
+ * Why a ready report's declared `work` cannot stand, or undefined when it can. A report that changed a file through this Session
+ * is a code change whatever it calls itself: claiming `data`, `verify` or `docs` is the one way a result escapes review, so the
+ * Session's own calls decide, never the claim. Nothing is checked against the diff, only that a change happened at all.
+ */
+export function unclaimedWork(work: string | undefined, calls: readonly string[]): string | undefined {
+  if (!work || !UNREVIEWED.includes(work)) return undefined
+  if (!calls.some(name => CHANGING.includes(name))) return undefined
+  return `You edited a file in this assignment, so work=${work} cannot stand: the result has a diff a Reviewer judges. Report it as `
+    + 'work=code, or drop the change and report what the run itself showed.'
+}

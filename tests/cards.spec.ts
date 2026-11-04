@@ -14,7 +14,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['A message attaches to a ticket only on an explicit pointer', 'dispatch',
     ['Attach only when the message points at that ticket explicitly', 'A message on a similar subject is a new request: accept or ignore it, never attach it.']],
   ['An Executor drops an attached thread it finds unrelated, without replying there', 'work',
-    ['call orchestrator_thread_unrelated with the thread key and a one-sentence reason; do not acknowledge it or reply there.']],
+    ['say so in your next report with', 'threads: [{ thread, reason }]', 'do not acknowledge it or reply there']],
   ['A located element or a few CSS lines settle no design', 'team/scope',
     ['Locating a visual element or changing few CSS lines proves neither settled design direction nor small visual impact']],
   ['An Executor rechecks a proactive ticket itself, whatever the team sections say', 'work',
@@ -44,7 +44,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
     ['A follow_up notice reports a person\'s message that already reached the workers it lists', 'you do not forward it again',
       'You see the same message yourself as a candidate', 'ignore it when a listed ticket plainly covers it',
       'Never accept it as a new ticket while a worker still decides it', 'arrives as a candidate with handed_back',
-      'orchestrator_ticket_hold', 'orchestrator_ticket_release'],
+      'orchestrator_ticket'],
     ['so it needs no decision', 'asks for new work beyond the ticket (orchestrator_ticket_accept']],
   ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session only stops the work on request', 'subscriptions',
     ['the ticket\'s worker decides whether it belongs to the ticket and hands back what does not']],
@@ -53,8 +53,8 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['A question for a person is asked through the report, not left where nobody reads it', 'work',
     ['Do not leave the question only in summary, GitHub or the Session and wait.']],
   ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session only stops the work on request', 'work',
-    ['Decide every person\'s message on this ticket\'s own threads yourself', 'back with orchestrator_trigger_handback',
-      'never drop a request silently', 'leave ordinary discussion unanswered']],
+    ['Decide every person\'s message on this ticket\'s own threads yourself', 'hand a request beyond it or for another ticket back in the same report',
+      'Never drop a request silently', 'leave ordinary discussion unanswered']],
   ['A person\'s message resumes an ended ticket without a decision', 'subscriptions', ['a human\'s message there resumes the ticket under the same mandate']],
   ['A thread can have several tickets, and its messages reach all of them', 'orchestrator',
     ['Messages on a subscribed thread go directly to the workers of its tickets.'], ['go directly to their worker']],
@@ -73,7 +73,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
     ['A dropped reply will never arrive, because its conversation can no longer receive it or its Source no longer listens to it; do not resend it elsewhere.',
       'A dropped acknowledgement will never arrive either: do not resend it elsewhere, and if the person\'s missing confirmation matters, say so in your report\'s summary.']],
   ['The main Session has no tool that messages a worker', 'replies',
-    ['wait for the worker\'s report, or request one with orchestrator_ticket_request_status when the ticket is idle'], ['ask the worker']],
+    ['wait for the worker\'s report, or request one with orchestrator_ticket action=status when the ticket is idle'], ['ask the worker']],
   ['The main Session has no tool that messages a worker', 'shared', ['leaves worker blockers and technical discussion to workers'], ['delegate']],
   ['The main Session has no tool that messages a worker', 'cli', ['leaves other context reads and local downloads to workers'], ['delegate']],
   ['The main Session has no tool that messages a worker', 'dispatch', [], ['Ask a worker']],
@@ -197,4 +197,20 @@ it('keeps what a model reads in a preview as written: code, angle brackets and l
   const text = 'Fix `Map<string, T>` typing, see [the issue](https://github.com/acme/widgets/issues/7)\n\n  **now**'
   expect(triggerCard({ ...trigger,
     text }).preview).toBe('Fix `Map<string, T>` typing, see [the issue](https://github.com/acme/widgets/issues/7) **now**')
+})
+
+it('keeps a host-recorded machinery failure out of a ticket card\'s preview, and marks it instead', () => {
+  const quota = 'LlmError: 403 {"error":{"type":"new_api_error","message":"Not enough quota to pre-consume for this request: $0.001362 remaining, $0.018002 required"}}'
+  const failed = { ...ticket, assignments: [{ id: 'a1', state: 'running' as const, createdAt: '2026-09-09T00:00:00Z',
+    report: { by: 'host' as const, state: 'failed' as const, summary: quota, at: '2026-09-09T01:00:00Z' } }] }
+  const card = ticketCard(failed)
+  // The failure is the machinery's, not the ticket's account of its work: the error text never becomes the card's preview.
+  expect(card.preview).not.toContain('LlmError')
+  expect(card.preview).toBe('The worker could not run; the ticket itself is unchanged.')
+  expect(card).toMatchObject({ worker_failed: true, title: 'Inspect failing check' })
+  // A worker's own failed account is its account of the work, so it still reads as the preview.
+  const own = { ...ticket, assignments: [{ id: 'a1', state: 'running' as const, createdAt: '2026-09-09T00:00:00Z',
+    report: { by: 'worker' as const, state: 'failed' as const, summary: 'Cannot reach the staging database', at: '2026-09-09T01:00:00Z' } }] }
+  expect(ticketCard(own)).toMatchObject({ preview: 'Cannot reach the staging database' })
+  expect(ticketCard(own)).not.toHaveProperty('worker_failed')
 })
